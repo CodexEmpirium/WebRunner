@@ -3,10 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Dungeon Runner</title>
-  <meta http-equiv="refresh" content="0; url=level1.html">
+  <title>WebRunner</title>
+  <link rel="stylesheet" href="./styles/hud.css">
 </head>
-<body>
-  <p><a href="level1.html">Start Dungeon Runner</a></p>
+<body data-level="1">
+  <div id="game"></div>
+  <script defer src="./vendor/pixi.min.js"></script>
+  <script defer src="./src/main.js"></script>
 </body>
 </html>
