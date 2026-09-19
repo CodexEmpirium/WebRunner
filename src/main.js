@@ -1,11 +1,16 @@
 async function main() {
 const { Application, Container, Graphics, Matrix, Rectangle, Sprite, Texture } = globalThis.PIXI;
-const levelId = Number(document.body.dataset.level || 1);
+const levelKey = document.body.dataset.level || "1";
+const isTutorial = levelKey === "tutorial";
+const levelId = isTutorial ? null : Number(levelKey);
 const availableLevels = [0, 1];
 const meter = 48;
 const tile = 64;
 const minPitch = Math.PI / 9;
 const maxPitch = Math.PI * 7 / 18;
+const bombThrowDuration = 0.82;
+const bombReleaseTime = 0.47;
+const gravity = 980;
 
 const state = {
   width: window.innerWidth,
@@ -16,7 +21,11 @@ const state = {
   zoom: 1,
   fade: new URLSearchParams(window.location.search).get("fade") === "1" ? 1 : 0,
   transitioning: false,
+  transitionTarget: null,
+  transitionDelay: 0,
   keys: new Set(),
+  projectiles: [],
+  explosions: [],
   inventory: { coins: 0, health: 0, mana: 0, magic: 0, bombs: 3 },
   player: {
     x: 0,
@@ -38,13 +47,42 @@ const state = {
     specialTime: 0,
     interactTime: 0,
     holdingBomb: false,
+    stealth: false,
     bombThrowTime: 0,
+    landTime: 0,
     lastMoveX: 0,
-    lastMoveY: -1
-  }
+    lastMoveY: -1,
+    health: 100,
+    maxHealth: 100,
+    contactDamageCooldown: 0,
+    hitFlash: 0
+  },
+  tutorial: isTutorial ? {
+    step: 0,
+    advancing: false,
+    movementKeys: new Set(),
+    sprintDistance: 0,
+    jumpStarted: false,
+    portalActive: false,
+    portalPull: false,
+    portalDive: false,
+    portalDiveTime: 0,
+    portalHidden: false,
+    portal: { x: 0, y: -10 * meter }
+  } : null
 };
-
 const levels = {
+  tutorial: {
+    name: "Tutorial",
+    kind: "tutorial",
+    bounds: [{ x: -12 * meter, y: -12 * meter, w: 24 * meter, h: 24 * meter, name: "training" }],
+    torches: [],
+    columns: [],
+    waterPools: [],
+    coins: [],
+    potions: [],
+    exit: null
+  },
   0: {
     name: "Level 0",
     kind: "infinite",
@@ -103,11 +141,44 @@ const levels = {
       { x: 260, y: -340 },
       { x: -380, y: -655 },
       { x: 380, y: -655 }
+    ],
+    enemies: [
+      { x: -82, y: -690, phase: 0.08 },
+      { x: 92, y: -505, phase: 0.58 }
     ]
   }
 };
 
-const level = levels[levelId] || levels[1];
+const level = levels[levelKey] || levels[1];
+state.enemies = (level.enemies || []).map((enemy, index) => ({
+  id: `dungeon-slime-${index + 1}`,
+  name: "Dungeon Slime",
+  enemyClass: "jumpingBlob",
+  x: enemy.x,
+  y: enemy.y,
+  originX: enemy.x,
+  originY: enemy.y,
+  targetX: enemy.x,
+  targetY: enemy.y,
+  heading: Math.PI / 2,
+  z: 0,
+  health: 100,
+  maxHealth: 100,
+  contactDamage: 10,
+  jumpClock: enemy.phase * 1.7,
+  cycleDuration: 1.7,
+  alive: true,
+  visual: null
+}));
+const tutorialSteps = [
+  { title: "Movement", instruction: "Move once in every direction.", command: "W A S D" },
+  { title: "Sprint", instruction: "Hold Shift while moving for 3 meters.", command: "SHIFT + W A S D" },
+  { title: "Jump", instruction: "Jump and land on your feet.", command: "SPACE" },
+  { title: "Attack", instruction: "Strike once with your sword.", command: "LEFT CLICK" },
+  { title: "Item Belt", instruction: "Open your item belt.", command: "E" },
+  { title: "Ready Bomb", instruction: "Select the bomb from your item belt.", command: "4" },
+  { title: "Throw Bomb", instruction: "Throw the readied bomb.", command: "RIGHT CLICK" }
+];
 const hud = buildHud(levelId);
 const art = await loadArt();
 const app = new Application();
@@ -129,9 +200,14 @@ const actorLayer = new Container();
 const actorShadow = new Graphics();
 const actorSprite = new Sprite(art.action[0][0]);
 const actorFx = new Graphics();
+const entityLayer = new Container();
+const effectsLayer = new Graphics();
+const occlusionLayer = new Graphics();
 actorSprite.anchor.set(0.5, 0.9);
 actorLayer.addChild(actorShadow, actorSprite, actorFx);
-world.addChild(floorLayer, g, actorLayer);
+entityLayer.sortableChildren = true;
+entityLayer.addChild(actorLayer);
+world.addChild(floorLayer, g, entityLayer, effectsLayer, occlusionLayer);
 let floorSpriteCount = 0;
 
 async function loadArt() {
@@ -141,39 +217,75 @@ async function loadArt() {
     image.onerror = () => reject(new Error(`Unable to load artwork: ${path}`));
     image.src = new URL(path, window.location.href).href;
   });
-  const [runImage, actionImage, floorImage, wallImage] = await Promise.all([
-    loadImage("./assets/art/rogue-run-sheet.png"),
-    loadImage("./assets/art/rogue-action-sheet.png"),
+  const [runImage, runStealthImage, actionImage, lowImage, crawlImage, bombImage, bombCombatImage, slimeImage, floorImage, wallImage] = await Promise.all([
+    loadImage("./assets/art/rogue-run-v3-clean.png"),
+    loadImage("./assets/art/rogue-run-stealth-v2-clean.png"),
+    loadImage("./assets/art/rogue-action-v2-clean.png"),
+    loadImage("./assets/art/rogue-low-v2-clean.png"),
+    loadImage("./assets/art/rogue-crawl-v3-clean.png"),
+    loadImage("./assets/art/rogue-bomb-v3-clean.png"),
+    loadImage("./assets/art/rogue-bomb-v2-clean.png"),
+    loadImage("./assets/art/enemy-dungeon-slime-clean.png"),
     loadImage("./assets/art/dungeon-floor.png"),
     loadImage("./assets/art/dungeon-wall.png")
   ]);
-  const sliceSheet = (image) => {
+  const sliceSheet = (image, columns, rows, horizontalInset = 0) => {
     const base = Texture.from(image);
-    const cellWidth = Math.floor(image.naturalWidth / 4);
-    const cellHeight = Math.floor(image.naturalHeight / 4);
-    return Array.from({ length: 4 }, (_, row) => Array.from({ length: 4 }, (_, column) => new Texture({
+    const cellWidth = Math.floor(image.naturalWidth / columns);
+    const cellHeight = Math.floor(image.naturalHeight / rows);
+    return Array.from({ length: rows }, (_, row) => Array.from({ length: columns }, (_, column) => new Texture({
       source: base.source,
-      frame: new Rectangle(column * cellWidth, row * cellHeight, cellWidth, cellHeight)
+      frame: new Rectangle(
+        column * cellWidth + horizontalInset,
+        row * cellHeight,
+        cellWidth - horizontalInset * 2,
+        cellHeight
+      )
     })));
   };
   const floor = Texture.from(floorImage);
   const wall = Texture.from(wallImage);
   floor.source.addressMode = "repeat";
   wall.source.addressMode = "repeat";
-  return { run: sliceSheet(runImage), action: sliceSheet(actionImage), floor, wall };
+  return {
+    run: sliceSheet(runImage, 8, 8),
+    runStealth: sliceSheet(runStealthImage, 4, 8),
+    action: sliceSheet(actionImage, 4, 8),
+    low: sliceSheet(lowImage, 6, 8),
+    crawl: sliceSheet(crawlImage, 6, 8),
+    bomb: sliceSheet(bombImage, 7, 8),
+    bombCombat: sliceSheet(bombCombatImage, 3, 8),
+    slime: sliceSheet(slimeImage, 8, 8),
+    floor,
+    wall
+  };
 }
 
 function buildHud(currentLevel) {
   const root = document.createElement("div");
-  root.className = "hud";
-  root.innerHTML = `
-    <div class="top-hud">
+  root.className = `hud${isTutorial ? " tutorial-hud" : ""}`;
+  const levelControl = isTutorial ? `
+      <div class="tutorial-title">Initiate's Trial</div>` : `
       <form class="level-jump" id="levelJump">
         <label for="levelInput">Go to Level</label>
         <input id="levelInput" type="number" inputmode="numeric" min="0" max="1" step="1" value="${currentLevel}">
         <button type="submit">Go</button>
-      </form>
+      </form>`;
+  const tutorialPanel = isTutorial ? `
+    <section class="tutorial-panel" id="tutorialPanel" aria-live="polite">
+      <div class="tutorial-count" id="tutorialCount">Lesson 1 / ${tutorialSteps.length}</div>
+      <div class="tutorial-copy">
+        <strong id="tutorialStep">Movement</strong>
+        <span id="tutorialInstruction">Move once in every direction.</span>
+      </div>
+      <div class="tutorial-command" id="tutorialCommand">W A S D</div>
+      <div class="tutorial-progress"><i id="tutorialProgress"></i></div>
+    </section>` : "";
+  root.innerHTML = `
+    <div class="top-hud">
+      ${levelControl}
       <div class="inventory">
+        <span>HP <b id="playerHealth">100</b></span>
         <span>Coins <b id="coinCount">0</b></span>
         <span>Health <b id="healthCount">0</b></span>
         <span>Mana <b id="manaCount">0</b></span>
@@ -182,6 +294,7 @@ function buildHud(currentLevel) {
       </div>
       <div class="status-line" id="statusLine">World mode</div>
     </div>
+    ${tutorialPanel}
     <div class="item-menu hidden" id="itemMenu">
       <span>1 Health</span>
       <span>2 Mana</span>
@@ -194,9 +307,9 @@ function buildHud(currentLevel) {
         <div class="key key-left">&#9664;</div>
         <div class="key key-down">&#9660;</div>
         <div class="key key-right">&#9654;</div>
-        <div class="key space-key">SPACE</div>
+        <div class="key space-key${isTutorial ? " tutorial-concealed" : ""}" id="spaceHint">SPACE</div>
       </div>
-      <div class="hint-label">Run jump sprint</div>
+      <div class="hint-label" id="movementHint">${isTutorial ? "Movement unlocked" : "Run jump sprint"}</div>
     </div>
     <div class="hint hint-right">
       <div class="mouse"><div class="mouse-wheel"></div></div>
@@ -209,6 +322,7 @@ function buildHud(currentLevel) {
     levelInput: root.querySelector("#levelInput"),
     itemMenu: root.querySelector("#itemMenu"),
     statusLine: root.querySelector("#statusLine"),
+    playerHealth: root.querySelector("#playerHealth"),
     coinCount: root.querySelector("#coinCount"),
     healthCount: root.querySelector("#healthCount"),
     manaCount: root.querySelector("#manaCount"),
@@ -216,22 +330,34 @@ function buildHud(currentLevel) {
     bombCount: root.querySelector("#bombCount")
   };
 
-  refs.levelInput.addEventListener("input", () => {
-    refs.levelInput.value = refs.levelInput.value.replace(/\D/g, "");
-  });
-  refs.levelJump.addEventListener("submit", (event) => {
-    event.preventDefault();
-    const target = Number(refs.levelInput.value);
-    if (!Number.isInteger(target) || !availableLevels.includes(target)) {
-      refs.levelInput.value = String(currentLevel);
-      return;
-    }
-    window.location.href = `level${target}.html`;
-  });
+  refs.tutorialPanel = root.querySelector("#tutorialPanel");
+  refs.tutorialCount = root.querySelector("#tutorialCount");
+  refs.tutorialStep = root.querySelector("#tutorialStep");
+  refs.tutorialInstruction = root.querySelector("#tutorialInstruction");
+  refs.tutorialCommand = root.querySelector("#tutorialCommand");
+  refs.tutorialProgress = root.querySelector("#tutorialProgress");
+  refs.spaceHint = root.querySelector("#spaceHint");
+  refs.movementHint = root.querySelector("#movementHint");
+
+  if (refs.levelInput) {
+    refs.levelInput.addEventListener("input", () => {
+      refs.levelInput.value = refs.levelInput.value.replace(/\D/g, "");
+    });
+    refs.levelJump.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const target = Number(refs.levelInput.value);
+      if (!Number.isInteger(target) || !availableLevels.includes(target)) {
+        refs.levelInput.value = String(currentLevel);
+        return;
+      }
+      window.location.href = `level${target}.html`;
+    });
+  }
   return refs;
 }
 
 function refreshInventory() {
+  hud.playerHealth.textContent = state.player.health;
   hud.coinCount.textContent = state.inventory.coins;
   hud.healthCount.textContent = state.inventory.health;
   hud.manaCount.textContent = state.inventory.mana;
@@ -241,6 +367,72 @@ function refreshInventory() {
 
 function setStatus(text) {
   hud.statusLine.textContent = text;
+}
+
+function tutorialActionUnlocked(action) {
+  if (!isTutorial || state.tutorial.portalActive) return true;
+  const unlockStep = { movement: 0, sprint: 1, jump: 2, attack: 3, items: 4, selectItem: 5, special: 6 };
+  return state.tutorial.step >= unlockStep[action];
+}
+
+function tutorialProgress() {
+  if (!isTutorial) return 0;
+  const tutorial = state.tutorial;
+  if (tutorial.advancing) return 1;
+  if (tutorial.step === 0) return tutorial.movementKeys.size / 4;
+  if (tutorial.step === 1) return clamp(tutorial.sprintDistance / (3 * meter), 0, 1);
+  return 0;
+}
+
+function refreshTutorialHud() {
+  if (!isTutorial) return;
+  const tutorial = state.tutorial;
+  if (tutorial.portalActive) {
+    hud.tutorialCount.textContent = "Training complete";
+    hud.tutorialStep.textContent = "The Way Forward";
+    hud.tutorialInstruction.textContent = "A portal has opened. Step into its center.";
+    hud.tutorialCommand.textContent = "ENTER PORTAL";
+    hud.tutorialProgress.style.width = "100%";
+    hud.movementHint.textContent = "All actions unlocked";
+    hud.spaceHint.classList.remove("tutorial-concealed");
+    return;
+  }
+  const lesson = tutorialSteps[tutorial.step];
+  hud.tutorialCount.textContent = `Lesson ${tutorial.step + 1} / ${tutorialSteps.length}`;
+  hud.tutorialStep.textContent = tutorial.advancing ? `${lesson.title} complete` : lesson.title;
+  hud.tutorialInstruction.textContent = tutorial.advancing ? "Preparing the next lesson..." : lesson.instruction;
+  hud.tutorialCommand.textContent = tutorial.advancing ? "COMPLETE" : lesson.command;
+  hud.tutorialProgress.style.width = `${tutorialProgress() * 100}%`;
+  if (tutorial.step >= 2) hud.spaceHint.classList.remove("tutorial-concealed");
+  hud.movementHint.textContent = tutorial.step === 0 ? "Movement unlocked" : tutorial.step === 1 ? "Sprint unlocked" : "Move jump sprint";
+}
+
+function completeTutorialStep(expectedStep) {
+  if (!isTutorial || state.tutorial.step !== expectedStep || state.tutorial.advancing) return;
+  state.tutorial.advancing = true;
+  setStatus("Lesson complete");
+  refreshTutorialHud();
+  window.setTimeout(() => {
+    if (expectedStep === tutorialSteps.length - 1) {
+      state.tutorial.portalActive = true;
+      state.tutorial.advancing = false;
+      hud.itemMenu.classList.add("hidden");
+      setStatus("Portal opened");
+    } else {
+      state.tutorial.step += 1;
+      state.tutorial.advancing = false;
+      setStatus(tutorialSteps[state.tutorial.step].title);
+    }
+    refreshTutorialHud();
+  }, 650);
+}
+
+function startTransition(target, delay = 0) {
+  if (state.transitioning) return;
+  state.transitioning = true;
+  state.transitionTarget = target;
+  state.transitionDelay = delay;
+  state.fade = 0;
 }
 
 function clamp(value, min, max) {
@@ -268,6 +460,10 @@ function worldToScreen(x, y, z = 0) {
   };
 }
 
+function cameraDepth(x, y) {
+  return rotate(x - state.player.x, y - state.player.y, -state.yaw).y;
+}
+
 function groundDirection(angle) {
   const screenAngle = angle - state.yaw;
   const x = Math.cos(screenAngle);
@@ -289,20 +485,20 @@ function rectWorld(rect, fill, stroke = 0x080605, alpha = 1) {
   ], fill, stroke, 3, alpha);
 }
 
-function poly(points, fill, stroke = null, lineWidth = 1, alpha = 1) {
-  g.poly(points.flatMap((point) => [point.x, point.y])).fill({ color: fill, alpha });
+function poly(points, fill, stroke = null, lineWidth = 1, alpha = 1, target = g) {
+  target.poly(points.flatMap((point) => [point.x, point.y])).fill({ color: fill, alpha });
   if (stroke !== null) {
-    g.stroke({ color: stroke, width: lineWidth, alpha: 1 });
+    target.stroke({ color: stroke, width: lineWidth, alpha: 1 });
   }
 }
 
-function centeredRect(x, y, w, h, fill, stroke = null) {
-  g.rect(Math.round(x - w / 2), Math.round(y - h / 2), w, h).fill(fill);
-  if (stroke !== null) g.stroke({ color: stroke, width: 2 });
+function centeredRect(x, y, w, h, fill, stroke = null, target = g) {
+  target.rect(Math.round(x - w / 2), Math.round(y - h / 2), w, h).fill(fill);
+  if (stroke !== null) target.stroke({ color: stroke, width: 2 });
 }
 
-function line(a, b, stroke, width = 2, alpha = 1) {
-  g.moveTo(a.x, a.y).lineTo(b.x, b.y).stroke({ color: stroke, width, alpha });
+function line(a, b, stroke, width = 2, alpha = 1, target = g) {
+  target.moveTo(a.x, a.y).lineTo(b.x, b.y).stroke({ color: stroke, width, alpha });
 }
 
 function tileCorners(tx, ty) {
@@ -356,9 +552,7 @@ function pointInRawWalkable(x, y) {
 function pointInWalkable(x, y, radius = 0) {
   if (level.kind === "infinite") return true;
   const samples = [[x, y], [x - radius, y], [x + radius, y], [x, y - radius], [x, y + radius]];
-  const inBounds = samples.every(([sx, sy]) => pointInRawWalkable(sx, sy));
-  const inColumn = level.columns.some((column) => Math.hypot(x - column.x, y - column.y) < 28 + radius);
-  return inBounds && !inColumn;
+  return samples.every(([sx, sy]) => pointInRawWalkable(sx, sy));
 }
 
 function groundElevation(x, y) {
@@ -369,6 +563,9 @@ function groundElevation(x, y) {
     return progress * level.platformHeight;
   }
   if (pointInRect(x, y, level.upperPlatform)) return level.platformHeight;
+  for (const column of level.columns) {
+    if (Math.hypot(x - column.x, y - column.y) <= 24) return 70;
+  }
   return 0;
 }
 
@@ -380,6 +577,46 @@ function drawInfiniteFloor() {
       const dist = Math.hypot((gx + 0.5) * tile - state.player.x, (gy + 0.5) * tile - state.player.y);
       if (dist <= tile * 13.2) drawTile(gx, gy);
     }
+  }
+}
+
+function drawTutorialFloor() {
+  const boundary = level.bounds[0];
+  const baseX = Math.floor(state.player.x / tile);
+  const baseY = Math.floor(state.player.y / tile);
+  for (let gy = baseY - 14; gy <= baseY + 14; gy += 1) {
+    for (let gx = baseX - 14; gx <= baseX + 14; gx += 1) {
+      const centerX = gx * tile + tile / 2;
+      const centerY = gy * tile + tile / 2;
+      const dist = Math.hypot(centerX - state.player.x, centerY - state.player.y);
+      if (dist <= tile * 13.2 && pointInRect(centerX, centerY, boundary)) drawTile(gx, gy);
+    }
+  }
+  if (state.tutorial.portalActive) drawPortal();
+}
+
+function drawPortal() {
+  const portal = state.tutorial.portal;
+  const p = worldToScreen(portal.x, portal.y);
+  const pulse = 1 + Math.sin(performance.now() * 0.004) * 0.08;
+  const s = state.zoom;
+  g.ellipse(p.x, p.y, 82 * s * pulse, 32 * s * pulse)
+    .fill({ color: 0x2c0e38, alpha: 0.32 });
+  g.ellipse(p.x, p.y, 66 * s, 25 * s)
+    .fill({ color: 0x030204, alpha: 0.96 })
+    .stroke({ color: 0xb45bd6, width: 4 * s, alpha: 0.9 });
+  g.ellipse(p.x, p.y, 47 * s, 17 * s)
+    .stroke({ color: 0x63d4ca, width: 2 * s, alpha: 0.66 });
+  for (let i = 0; i < 7; i += 1) {
+    const angle = performance.now() * 0.0012 + i * Math.PI * 2 / 7;
+    const radius = 42 + Math.sin(angle * 2.4) * 7;
+    const mote = worldToScreen(
+      portal.x + Math.cos(angle) * radius,
+      portal.y + Math.sin(angle) * radius,
+      12 + Math.sin(angle * 1.7) * 10
+    );
+    g.circle(mote.x, mote.y, (2.5 + (i % 2)) * s)
+      .fill({ color: i % 2 ? 0x7ce0d3 : 0xcf72ee, alpha: 0.78 });
   }
 }
 
@@ -407,7 +644,6 @@ function drawDungeonFloor() {
     rectWorld({ x: pool.x + 7, y: pool.y + 7, w: pool.w - 14, h: pool.h - 14 }, 0x2b7276, null, 0.12);
   }
   drawWalls();
-  drawUpperPlatform();
   drawStairs();
   drawSceneObjects();
 }
@@ -449,27 +685,22 @@ function drawWallSegment(x1, y1, x2, y2, fill, wallHeight) {
     { x: b.x + lipX, y: b.y - h + lipY }, { x: a.x + lipX, y: a.y - h + lipY }
   ], 0x625541, 0x100d0a, 2, 0.72);
   line({ x: a.x, y: a.y - h + 2 }, { x: b.x, y: b.y - h + 2 }, 0xb09a70, 1, 0.38);
-  const smokeCount = Math.max(3, Math.ceil(length / 82));
-  for (let i = 0; i <= smokeCount; i += 1) {
-    const t = i / smokeCount;
-    const drift = Math.sin(performance.now() * 0.00055 + i * 2.1 + x1 * 0.01) * 9;
-    const smokeX = a.x + dx * t + drift;
-    const smokeY = a.y + dy * t - h - 7 - Math.cos(i * 1.7) * 6;
-    const random = hash(Math.round(x1 + t * 100), Math.round(y1), i);
-    const size = (24 + random * 24) * state.zoom;
-    g.circle(smokeX - size * 0.25, smokeY + size * 0.03, size * 0.34)
-      .fill({ color: 0x71695e, alpha: 0.065 });
-    g.circle(smokeX + size * 0.12, smokeY - size * 0.13, size * 0.42)
-      .fill({ color: 0x5b554d, alpha: 0.075 });
-    g.circle(smokeX + size * 0.42, smokeY + size * 0.06, size * 0.29)
-      .fill({ color: 0x3a3732, alpha: 0.08 });
-    g.circle(smokeX + drift * 0.25, smokeY - size * 0.54, size * 0.27)
-      .fill({ color: 0x171614, alpha: 0.11 });
+  const fadeHeight = Math.max(4, h * 0.05);
+  const fadeSteps = 5;
+  for (let i = 0; i < fadeSteps; i += 1) {
+    const lower = i / fadeSteps;
+    const upper = (i + 1) / fadeSteps;
+    poly([
+      { x: a.x, y: a.y - h + fadeHeight * lower },
+      { x: b.x, y: b.y - h + fadeHeight * lower },
+      { x: b.x, y: b.y - h + fadeHeight * upper },
+      { x: a.x, y: a.y - h + fadeHeight * upper }
+    ], 0x8a8883, null, 1, 0.72 - i * 0.11);
   }
 }
 
-function texturedFace(points, texture, tint = 0xffffff, alpha = 1, scale = 0.13) {
-  g.poly(points.flatMap((point) => [point.x, point.y])).fill({
+function texturedFace(points, texture, tint = 0xffffff, alpha = 1, scale = 0.13, target = g) {
+  target.poly(points.flatMap((point) => [point.x, point.y])).fill({
     texture,
     color: tint,
     matrix: new Matrix().scale(scale),
@@ -501,7 +732,7 @@ function drawUpperPlatform() {
   const leftBottomBack = worldToScreen(rect.x, rect.y, z - 38);
   texturedFace([top[0], top[3], frontBottomLeft, leftBottomBack], art.wall, 0x95856f, 1, 0.1);
   poly(top, 0x514b42, 0x080706, 2, 1);
-  texturedFace(top, art.floor, 0xf0dfc3, 0.7, 0.11);
+  texturedFace(top, art.floor, 0xf0dfc3, 1, 0.11);
   line(top[3], top[2], 0xe2c88f, 4, 0.9);
   for (let x = rect.x + 80; x < rect.x + rect.w; x += 92) {
     line(worldToScreen(x, rect.y + 6, z + 0.5), worldToScreen(x, rect.y + rect.h - 6, z + 0.5), 0x17130f, 1.5, 0.52);
@@ -519,7 +750,7 @@ function drawUpperPlatform() {
   drawElevatedExit();
 }
 
-function drawElevatedExit() {
+function drawElevatedExit(target = g) {
   const z = level.platformHeight;
   const x1 = level.exit.x;
   const x2 = level.exit.x + level.exit.w;
@@ -529,7 +760,7 @@ function drawElevatedExit() {
   const bottomRight = worldToScreen(x2, y, z);
   const topRight = worldToScreen(x2, y, z + height);
   const topLeft = worldToScreen(x1, y, z + height);
-  poly([bottomLeft, bottomRight, topRight, topLeft], 0x24150f, 0xb5904e, 4, 1);
+  poly([bottomLeft, bottomRight, topRight, topLeft], 0x24150f, 0xb5904e, 4, 1, target);
   for (let i = 1; i < 4; i += 1) {
     const t = i / 4;
     line(
@@ -537,16 +768,17 @@ function drawElevatedExit() {
       { x: topLeft.x + (topRight.x - topLeft.x) * t, y: topLeft.y + (topRight.y - topLeft.y) * t },
       0x7a4a2b,
       2,
-      0.75
+      0.75,
+      target
     );
   }
-  line(topLeft, topRight, 0xe2c078, 5, 0.9);
-  line(bottomLeft, topLeft, 0x72552e, 4, 0.95);
-  line(bottomRight, topRight, 0x72552e, 4, 0.95);
-  g.circle(bottomRight.x - 9 * state.zoom, bottomRight.y - 42 * state.zoom, 3 * state.zoom).fill(0xd4a64e);
+  line(topLeft, topRight, 0xe2c078, 5, 0.9, target);
+  line(bottomLeft, topLeft, 0x72552e, 4, 0.95, target);
+  line(bottomRight, topRight, 0x72552e, 4, 0.95, target);
+  target.circle(bottomRight.x - 9 * state.zoom, bottomRight.y - 42 * state.zoom, 3 * state.zoom).fill(0xd4a64e);
 }
 
-function drawStairs() {
+function drawStairs(target = g, foregroundOnly = false) {
   const steps = 12;
   const width = 100;
   const depth = 42;
@@ -556,6 +788,7 @@ function drawStairs() {
     const z = level.platformHeight * (i + 1) / steps;
     const previousZ = level.platformHeight * i / steps;
     const rect = { x: -370, y: startY - i * stride, w: width, h: depth };
+    if (foregroundOnly && cameraDepth(rect.x + rect.w / 2, rect.y + rect.h / 2) <= 10) continue;
     const top = [
       worldToScreen(rect.x, rect.y, z), worldToScreen(rect.x + rect.w, rect.y, z),
       worldToScreen(rect.x + rect.w, rect.y + rect.h, z), worldToScreen(rect.x, rect.y + rect.h, z)
@@ -565,11 +798,54 @@ function drawStairs() {
       worldToScreen(rect.x + rect.w, rect.y + rect.h, previousZ),
       worldToScreen(rect.x, rect.y + rect.h, previousZ)
     ];
-    poly(riser, 0x3a332a, 0x080706, 2, 1);
-    texturedFace(riser, art.wall, 0xb09c7f, 0.8, 0.09);
-    poly(top, 0x575047, 0x080706, 2, 1);
-    texturedFace(top, art.floor, 0xe0d1b7, 0.72, 0.1);
-    line(top[3], top[2], 0xe0c88e, 2.2, 0.8);
+    poly(riser, 0x3a332a, 0x080706, 2, 1, target);
+    texturedFace(riser, art.wall, 0xb09c7f, 0.8, 0.09, target);
+    poly(top, 0x575047, 0x080706, 2, 1, target);
+    texturedFace(top, art.floor, 0xe0d1b7, 1, 0.1, target);
+    line(top[3], top[2], 0xe0c88e, 2.2, 0.8, target);
+  }
+}
+
+function drawUpperPlatformOccluder() {
+  const rect = level.upperPlatform;
+  const playerOnPlatform = state.player.floorZ >= level.platformHeight - 8 && pointInRect(state.player.x, state.player.y, rect, 8);
+  if (playerOnPlatform || cameraDepth(rect.x + rect.w / 2, rect.y + rect.h / 2) <= 10) return;
+  const z = level.platformHeight;
+  const top = [
+    worldToScreen(rect.x, rect.y, z),
+    worldToScreen(rect.x + rect.w, rect.y, z),
+    worldToScreen(rect.x + rect.w, rect.y + rect.h, z),
+    worldToScreen(rect.x, rect.y + rect.h, z)
+  ];
+  const front = [
+    top[3], top[2],
+    worldToScreen(rect.x + rect.w, rect.y + rect.h, z - 38),
+    worldToScreen(rect.x, rect.y + rect.h, z - 38)
+  ];
+  poly(front, 0x3a332a, 0x080706, 2, 1, occlusionLayer);
+  texturedFace(front, art.wall, 0xc0ad91, 1, 0.1, occlusionLayer);
+  poly(top, 0x514b42, 0x080706, 2, 1, occlusionLayer);
+  texturedFace(top, art.floor, 0xf0dfc3, 1, 0.11, occlusionLayer);
+  line(top[3], top[2], 0xe2c88f, 4, 0.9, occlusionLayer);
+}
+
+function drawForegroundOccluders() {
+  if (level.kind !== "dungeon") return;
+  const playerOnPlatform = state.player.floorZ >= level.platformHeight - 8 && pointInRect(state.player.x, state.player.y, level.upperPlatform, 8);
+  drawUpperPlatformOccluder();
+  if (cameraDepth(level.exit.x + level.exit.w / 2, level.exit.y + level.exit.h / 2) > 8) drawElevatedExit(occlusionLayer);
+  drawStairs(occlusionLayer, true);
+  const columns = level.columns
+    .filter(() => !playerOnPlatform)
+    .filter((column) => cameraDepth(column.x, column.y) > 8)
+    .filter((column) => !(state.player.floorZ >= 62 && Math.hypot(state.player.x - column.x, state.player.y - column.y) < 30))
+    .sort((a, b) => cameraDepth(a.x, a.y) - cameraDepth(b.x, b.y));
+  for (const column of columns) drawColumn(column, occlusionLayer);
+  for (const coin of level.coins) {
+    if (!coin.collected && cameraDepth(coin.x, coin.y) > 8) drawCoin(coin, occlusionLayer);
+  }
+  for (const potion of level.potions) {
+    if (!potion.collected && cameraDepth(potion.x, potion.y) > 8) drawPotion(potion, occlusionLayer);
   }
 }
 
@@ -579,12 +855,14 @@ function objectScreenY(object) {
 
 function drawSceneObjects() {
   const objects = [
+    { x: level.upperPlatform.x + level.upperPlatform.w / 2, y: level.upperPlatform.y + level.upperPlatform.h, kind: "upperPlatform" },
     ...level.columns.map((o) => ({ ...o, kind: "column" })),
     ...level.torches.map((o) => ({ ...o, kind: "torch" })),
     ...level.coins.filter((o) => !o.collected).map((o) => ({ ...o, kind: "coin" })),
     ...level.potions.filter((o) => !o.collected).map((o) => ({ ...o, kind: "potion" }))
   ].sort((a, b) => objectScreenY(a) - objectScreenY(b));
   for (const object of objects) {
+    if (object.kind === "upperPlatform") drawUpperPlatform();
     if (object.kind === "column") drawColumn(object);
     if (object.kind === "torch") drawTorch(object);
     if (object.kind === "coin") drawCoin(object);
@@ -592,48 +870,48 @@ function drawSceneObjects() {
   }
 }
 
-function drawColumn(column) {
+function drawColumn(column, target = g) {
   const p = worldToScreen(column.x, column.y);
   const z = 70 * state.zoom;
   const s = state.zoom;
-  g.ellipse(p.x + 9 * s, p.y + 8 * s, 28 * s, 11 * s).fill({ color: 0x000000, alpha: 0.44 });
+  target.ellipse(p.x + 9 * s, p.y + 8 * s, 28 * s, 11 * s).fill({ color: 0x000000, alpha: 0.44 });
   poly([
     { x: p.x - 13 * s, y: p.y - 9 * s }, { x: p.x + 13 * s, y: p.y - 9 * s },
     { x: p.x + 9 * s, y: p.y - z + 7 * s }, { x: p.x - 9 * s, y: p.y - z + 7 * s }
-  ], 0x3d382f, 0x0a0806, 2);
+  ], 0x3d382f, 0x0a0806, 2, 1, target);
   poly([
     { x: p.x - 9 * s, y: p.y - z + 7 * s }, { x: p.x + 9 * s, y: p.y - z + 7 * s },
     { x: p.x + 5 * s, y: p.y - z + 13 * s }, { x: p.x - 5 * s, y: p.y - z + 13 * s }
-  ], 0x71634d, null, 1, 0.5);
-  centeredRect(p.x, p.y - z - 2 * s, 42 * s, 11 * s, 0x332d25, 0x090706);
-  centeredRect(p.x, p.y - z - 10 * s, 32 * s, 8 * s, 0x51483a, 0x090706);
-  centeredRect(p.x, p.y - 2 * s, 42 * s, 12 * s, 0x2b261f, 0x090706);
-  centeredRect(p.x, p.y - 10 * s, 32 * s, 8 * s, 0x574b3a, 0x090706);
-  line({ x: p.x - 3 * s, y: p.y - 20 * s }, { x: p.x + 1 * s, y: p.y - 42 * s }, 0x17130f, 2, 0.7);
+  ], 0x71634d, null, 1, 0.5, target);
+  centeredRect(p.x, p.y - z - 2 * s, 42 * s, 11 * s, 0x332d25, 0x090706, target);
+  centeredRect(p.x, p.y - z - 10 * s, 32 * s, 8 * s, 0x51483a, 0x090706, target);
+  centeredRect(p.x, p.y - 2 * s, 42 * s, 12 * s, 0x2b261f, 0x090706, target);
+  centeredRect(p.x, p.y - 10 * s, 32 * s, 8 * s, 0x574b3a, 0x090706, target);
+  line({ x: p.x - 3 * s, y: p.y - 20 * s }, { x: p.x + 1 * s, y: p.y - 42 * s }, 0x17130f, 2, 0.7, target);
 }
 
-function drawCoin(coin) {
+function drawCoin(coin, target = g) {
   const p = worldToScreen(coin.x, coin.y);
   const bob = Math.sin(performance.now() * 0.004 + coin.x) * 3 * state.zoom;
   const y = p.y - 8 * state.zoom + bob;
-  g.ellipse(p.x + 3, p.y + 3, 10 * state.zoom, 4 * state.zoom).fill({ color: 0x000000, alpha: 0.38 });
-  g.ellipse(p.x, y, 8 * state.zoom, 11 * state.zoom).fill(0xd9a936).stroke({ color: 0x51300d, width: 2 });
-  g.ellipse(p.x, y, 4.5 * state.zoom, 7 * state.zoom).stroke({ color: 0xffe29a, width: 1.5, alpha: 0.7 });
-  line({ x: p.x - 2, y: y - 7 }, { x: p.x + 2, y: y + 4 }, 0xfff1bd, 1.5, 0.8);
+  target.ellipse(p.x + 3, p.y + 3, 10 * state.zoom, 4 * state.zoom).fill({ color: 0x000000, alpha: 0.38 });
+  target.ellipse(p.x, y, 8 * state.zoom, 11 * state.zoom).fill(0xd9a936).stroke({ color: 0x51300d, width: 2 });
+  target.ellipse(p.x, y, 4.5 * state.zoom, 7 * state.zoom).stroke({ color: 0xffe29a, width: 1.5, alpha: 0.7 });
+  line({ x: p.x - 2, y: y - 7 }, { x: p.x + 2, y: y + 4 }, 0xfff1bd, 1.5, 0.8, target);
 }
 
-function drawPotion(potion) {
+function drawPotion(potion, target = g) {
   const p = worldToScreen(potion.x, potion.y);
   const s = state.zoom;
   const pulse = 1 + Math.sin(performance.now() * 0.004 + potion.x) * 0.08;
-  g.circle(p.x, p.y - 10 * s, 31 * s * pulse).fill({ color: potion.glow, alpha: 0.16 });
-  g.ellipse(p.x + 3 * s, p.y + 3 * s, 13 * s, 5 * s).fill({ color: 0x000000, alpha: 0.42 });
-  g.roundRect(p.x - 10 * s, p.y - 25 * s, 20 * s, 25 * s, 7 * s)
+  target.circle(p.x, p.y - 10 * s, 31 * s * pulse).fill({ color: potion.glow, alpha: 0.16 });
+  target.ellipse(p.x + 3 * s, p.y + 3 * s, 13 * s, 5 * s).fill({ color: 0x000000, alpha: 0.42 });
+  target.roundRect(p.x - 10 * s, p.y - 25 * s, 20 * s, 25 * s, 7 * s)
     .fill({ color: potion.color, alpha: 0.9 }).stroke({ color: 0x170e18, width: 2.5 });
-  g.roundRect(p.x - 4 * s, p.y - 34 * s, 8 * s, 11 * s, 2 * s)
+  target.roundRect(p.x - 4 * s, p.y - 34 * s, 8 * s, 11 * s, 2 * s)
     .fill(0x685646).stroke({ color: 0x170e18, width: 2 });
-  g.circle(p.x - 4 * s, p.y - 17 * s, 3 * s).fill({ color: 0xffffff, alpha: 0.56 });
-  line({ x: p.x - 7 * s, y: p.y - 4 * s }, { x: p.x + 7 * s, y: p.y - 4 * s }, 0xe8d9bd, 2, 0.48);
+  target.circle(p.x - 4 * s, p.y - 17 * s, 3 * s).fill({ color: 0xffffff, alpha: 0.56 });
+  line({ x: p.x - 7 * s, y: p.y - 4 * s }, { x: p.x + 7 * s, y: p.y - 4 * s }, 0xe8d9bd, 2, 0.48, target);
 }
 
 function drawTorch(torch) {
@@ -769,44 +1047,105 @@ function drawLegacyCharacter() {
   }
 }
 
+function directionRowForHeading(heading) {
+  const direction = groundDirection(heading);
+  const angle = Math.atan2(direction.y, direction.x);
+  return ((Math.round((angle - Math.PI / 2) / (Math.PI / 4)) % 8) + 8) % 8;
+}
+
 function actorDirectionRow() {
-  const direction = groundDirection(state.player.heading);
-  if (Math.abs(direction.x) > Math.abs(direction.y)) return direction.x > 0 ? 3 : 1;
-  return direction.y > 0 ? 0 : 2;
+  return directionRowForHeading(state.player.heading);
 }
 
 function drawCharacter() {
   const player = state.player;
+  actorLayer.visible = !state.tutorial?.portalHidden;
+  if (!actorLayer.visible) return;
   const moving = isMoving();
   const row = actorDirectionRow();
   let column = 0;
   let sheet = art.action;
-  if (player.attackTime > 0) {
+  const throwProgress = player.bombThrowTime > 0 ? 1 - player.bombThrowTime / bombThrowDuration : 0;
+  if (player.rollTime > 0) {
+    sheet = art.low;
+    column = 3 + Math.floor((1 - player.rollTime / 0.55) * 3) % 3;
+  } else if (player.bombThrowTime > 0) {
+    sheet = art.bomb;
+    column = Math.min(6, Math.floor(throwProgress * 7));
+  } else if (player.holdingBomb && player.attackTime > 0) {
+    sheet = art.bombCombat;
+    column = 2;
+  } else if (player.holdingBomb) {
+    sheet = art.bomb;
+    column = 0;
+  } else if (player.attackTime > 0) {
     column = 1;
   } else if (!player.grounded || player.jumpArm > 0.12) {
-    column = 3;
-  } else if (player.stance !== "stand") {
     column = 2;
+  } else if (player.landTime > 0) {
+    column = 3;
+  } else if (player.stance === "crouch") {
+    sheet = art.low;
+    column = moving ? Math.floor(player.stride / (Math.PI * 0.75)) % 3 : 0;
+  } else if (player.stance === "crawl") {
+    sheet = art.crawl;
+    column = moving ? Math.floor(player.stride / (Math.PI / 3)) % 6 : 0;
   } else if (moving) {
-    sheet = art.run;
-    column = Math.floor((((player.stride % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2)) / (Math.PI * 0.5)) % 4;
+    sheet = player.stealth ? art.runStealth : art.run;
+    const frameCount = player.stealth ? 4 : 8;
+    column = Math.floor((((player.stride % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2)) / (Math.PI * 2 / frameCount)) % frameCount;
   }
 
   actorShadow.clear();
   actorFx.clear();
   const baseX = state.width / 2;
   const baseY = state.height / 2 + 18;
+  actorLayer.zIndex = baseY;
   const shadowScale = 1 - clamp(player.z / 240, 0, 0.48);
   actorShadow.ellipse(baseX + 4, baseY + 2, 34 * shadowScale * state.zoom, 12 * shadowScale * state.zoom)
     .fill({ color: 0x000000, alpha: 0.52 });
 
   actorSprite.texture = sheet[row][column];
-  actorSprite.position.set(baseX, baseY - player.z);
-  const stanceScale = player.stance === "crawl" ? 0.84 : player.stance === "crouch" ? 0.91 : 1;
-  const scale = 0.42 * state.zoom * stanceScale;
-  actorSprite.scale.set(scale, scale * (player.stance === "crawl" ? 0.82 : 1));
-  actorSprite.rotation = player.rollTime > 0 ? (1 - player.rollTime / 0.46) * Math.PI * 2 : 0;
+  const rolling = player.rollTime > 0;
+  actorSprite.anchor.set(0.5, rolling ? 0.5 : player.stance === "crawl" ? 0.76 : player.stance === "crouch" ? 0.82 : 0.9);
+  const targetHeight = rolling ? 112 : player.stance === "crawl" ? 112 : player.stance === "crouch" ? 124 : 142;
+  let scale = targetHeight / actorSprite.texture.height * state.zoom;
+  let poseX = 0;
+  let poseY = 0;
+  let poseRotation = 0;
+  if (player.bombThrowTime > 0) {
+    const stage = Math.min(5, Math.floor(throwProgress * 6));
+    const direction = groundDirection(player.heading);
+    const stageLean = [-2, -6, -10, 8, 11, 3][stage] * state.zoom;
+    poseX = direction.x * stageLean;
+    poseY = direction.y * stageLean - [0, 2, 5, 7, 3, 0][stage] * state.zoom;
+    poseRotation = [-0.01, -0.035, -0.065, 0.045, 0.025, 0][stage] * (row >= 4 ? -1 : 1);
+    scale *= [1, 0.985, 0.97, 1.025, 1.01, 1][stage];
+  }
+  actorSprite.position.set(baseX + poseX, baseY + poseY - player.z - (rolling ? targetHeight * state.zoom * 0.4 : 0));
+  actorSprite.scale.set(scale);
+  actorSprite.rotation = rolling ? (1 - player.rollTime / 0.55) * Math.PI * 2 : poseRotation;
   actorSprite.alpha = 1;
+
+  if (player.stealth && sheet !== art.runStealth && player.rollTime <= 0) {
+    const hoodYFactor = player.stance === "crawl" ? 0.2 : player.stance === "crouch" ? 0.62 : 0.72;
+    const hoodX = actorSprite.x;
+    const hoodY = actorSprite.y - targetHeight * state.zoom * hoodYFactor;
+    const hoodRadius = (player.stance === "crawl" ? 12 : 17) * state.zoom;
+    if (row >= 3 && row <= 5) {
+      actorFx.ellipse(hoodX, hoodY, hoodRadius * 1.05, hoodRadius * 1.18)
+        .fill(0x1a1512).stroke({ color: 0x080706, width: 2.2 * state.zoom });
+      actorFx.moveTo(hoodX - hoodRadius, hoodY + hoodRadius * 0.35)
+        .lineTo(hoodX, hoodY + hoodRadius * 1.45)
+        .lineTo(hoodX + hoodRadius, hoodY + hoodRadius * 0.35)
+        .fill(0x241915);
+    } else {
+      actorFx.arc(hoodX, hoodY, hoodRadius, Math.PI * 0.88, Math.PI * 2.12)
+        .stroke({ color: 0x1a1512, width: 8 * state.zoom });
+      actorFx.arc(hoodX, hoodY, hoodRadius + 2 * state.zoom, Math.PI * 0.9, Math.PI * 2.1)
+        .stroke({ color: 0x080706, width: 2 * state.zoom, alpha: 0.9 });
+    }
+  }
 
   if (player.attackTime > 0) {
     const attackProgress = 1 - player.attackTime / 0.28;
@@ -817,21 +1156,57 @@ function drawCharacter() {
       .stroke({ color: 0xffffff, width: 1.5 * state.zoom, alpha: 0.72 });
   }
 
-  if (player.holdingBomb) {
-    const handX = baseX + (row === 1 ? -35 : 35) * state.zoom;
-    const handY = baseY - 66 * state.zoom - player.z;
-    actorFx.circle(handX, handY, 18 * state.zoom).fill({ color: 0xff6b27, alpha: 0.13 });
-    actorFx.circle(handX, handY, 9 * state.zoom).fill(0x181512).stroke({ color: 0x6c5b44, width: 2 });
-    actorFx.moveTo(handX + 4, handY - 8).lineTo(handX + 8, handY - 16)
-      .stroke({ color: 0xf6a43a, width: 2.5, alpha: 0.95 });
-  }
+}
 
-  if (player.bombThrowTime > 0) {
-    const progress = 1 - player.bombThrowTime / 0.5;
-    const bomb = worldToScreen(player.x + Math.cos(player.heading) * 480 * progress, player.y + Math.sin(player.heading) * 480 * progress);
-    const bombY = bomb.y - Math.sin(progress * Math.PI) * 70;
-    actorFx.circle(bomb.x, bombY, 8 * state.zoom).fill(0x181512).stroke({ color: 0x877052, width: 2 });
-    actorFx.circle(bomb.x + 4, bombY - 7, 5 * state.zoom).fill({ color: 0xff7a2e, alpha: 0.3 });
+function createEnemyVisual(enemy) {
+  const container = new Container();
+  const shadow = new Graphics();
+  const sprite = new Sprite(art.slime[0][0]);
+  const healthBar = new Graphics();
+  sprite.anchor.set(0.5, 0.9);
+  container.addChild(shadow, sprite, healthBar);
+  entityLayer.addChild(container);
+  enemy.visual = { container, shadow, sprite, healthBar };
+}
+
+function slimeAnimationColumn(enemy) {
+  const t = enemy.jumpClock / enemy.cycleDuration;
+  if (t < 0.14) return 0;
+  if (t < 0.25) return 1;
+  if (t < 0.34) return 2;
+  if (t < 0.48) return 3;
+  if (t < 0.59) return 4;
+  if (t < 0.76) return 5;
+  if (t < 0.88) return 6;
+  return 7;
+}
+
+function drawEnemies() {
+  for (const enemy of state.enemies) {
+    if (!enemy.visual) createEnemyVisual(enemy);
+    const { container, shadow, sprite, healthBar } = enemy.visual;
+    container.visible = enemy.alive;
+    if (!enemy.alive) continue;
+    const base = worldToScreen(enemy.x, enemy.y, groundElevation(enemy.x, enemy.y));
+    const row = directionRowForHeading(enemy.heading);
+    const column = slimeAnimationColumn(enemy);
+    shadow.clear();
+    healthBar.clear();
+    shadow.ellipse(base.x + 3 * state.zoom, base.y + 3 * state.zoom, 34 * state.zoom, 12 * state.zoom)
+      .fill({ color: 0x000000, alpha: 0.48 });
+    sprite.texture = art.slime[row][column];
+    const scale = 78 / sprite.texture.height * state.zoom;
+    sprite.scale.set(scale);
+    sprite.position.set(base.x, base.y - enemy.z * state.zoom);
+    if (enemy.health < enemy.maxHealth) {
+      const width = 48 * state.zoom;
+      const y = sprite.y - 70 * state.zoom;
+      healthBar.roundRect(base.x - width / 2, y, width, 6 * state.zoom, 2 * state.zoom)
+        .fill({ color: 0x120d09, alpha: 0.92 });
+      healthBar.roundRect(base.x - width / 2 + 1, y + 1, (width - 2) * enemy.health / enemy.maxHealth, 4 * state.zoom, 1.5 * state.zoom)
+        .fill(0xaac53a);
+    }
+    container.zIndex = base.y;
   }
 }
 
@@ -845,6 +1220,159 @@ function isMoving() {
     state.keys.has("KeyW") || state.keys.has("KeyA") || state.keys.has("KeyS") || state.keys.has("KeyD");
 }
 
+function chooseSlimeLanding(enemy) {
+  enemy.originX = enemy.x;
+  enemy.originY = enemy.y;
+  const dx = state.player.x - enemy.x;
+  const dy = state.player.y - enemy.y;
+  const distance = Math.hypot(dx, dy) || 1;
+  const travel = Math.min(108, distance);
+  const variation = (hash(Math.round(enemy.x), Math.round(enemy.y), Math.floor(performance.now() / 1000)) - 0.5) * 34;
+  const candidateX = enemy.x + dx / distance * travel - dy / distance * variation;
+  const candidateY = enemy.y + dy / distance * travel + dx / distance * variation;
+  const chamber = level.bounds[2];
+  if (pointInWalkable(candidateX, candidateY, 22) && pointInRect(candidateX, candidateY, chamber, -22) && groundElevation(candidateX, candidateY) < 8) {
+    enemy.targetX = candidateX;
+    enemy.targetY = candidateY;
+    enemy.heading = Math.atan2(candidateY - enemy.y, candidateX - enemy.x);
+  } else {
+    enemy.targetX = enemy.x;
+    enemy.targetY = enemy.y;
+    enemy.heading = Math.atan2(dy, dx);
+  }
+}
+
+function updateEnemies(delta) {
+  const player = state.player;
+  player.contactDamageCooldown = Math.max(0, player.contactDamageCooldown - delta);
+  player.hitFlash = Math.max(0, player.hitFlash - delta);
+  for (const enemy of state.enemies) {
+    if (!enemy.alive) continue;
+    enemy.jumpClock += delta;
+    if (enemy.jumpClock >= enemy.cycleDuration) {
+      enemy.jumpClock %= enemy.cycleDuration;
+      chooseSlimeLanding(enemy);
+    }
+    const t = enemy.jumpClock / enemy.cycleDuration;
+    if (t >= 0.25 && t <= 0.88) {
+      const q = clamp((t - 0.25) / 0.63, 0, 1);
+      const eased = q * q * (3 - 2 * q);
+      enemy.x = enemy.originX + (enemy.targetX - enemy.originX) * eased;
+      enemy.y = enemy.originY + (enemy.targetY - enemy.originY) * eased;
+      enemy.z = Math.sin(q * Math.PI) * 62;
+    } else {
+      if (t > 0.88) {
+        enemy.x = enemy.targetX;
+        enemy.y = enemy.targetY;
+      }
+      enemy.z = 0;
+    }
+    const sameHeight = Math.abs((groundElevation(enemy.x, enemy.y) + enemy.z) - (player.floorZ + player.z)) < 30;
+    if (sameHeight && Math.hypot(player.x - enemy.x, player.y - enemy.y) < 34 && player.contactDamageCooldown <= 0) {
+      player.health = Math.max(0, player.health - enemy.contactDamage);
+      player.contactDamageCooldown = 2;
+      player.hitFlash = 0.24;
+      refreshInventory();
+      setStatus(`${enemy.name} dealt ${enemy.contactDamage} damage`);
+    }
+  }
+}
+
+function blastPathClear(explosion, enemy) {
+  const targetZ = groundElevation(enemy.x, enemy.y) + enemy.z + 18;
+  for (let step = 1; step < 10; step += 1) {
+    const t = step / 10;
+    const x = explosion.x + (enemy.x - explosion.x) * t;
+    const y = explosion.y + (enemy.y - explosion.y) * t;
+    const z = explosion.z + (targetZ - explosion.z) * t;
+    if (!pointInRawWalkable(x, y) || groundElevation(x, y) > z + 5) return false;
+    if (level.columns.some((column) => Math.hypot(x - column.x, y - column.y) < 25 && z < 76)) return false;
+  }
+  return true;
+}
+
+function explodeBomb(projectile) {
+  const explosion = { x: projectile.x, y: projectile.y, z: Math.max(projectile.z, groundElevation(projectile.x, projectile.y)), age: 0, duration: 0.52 };
+  state.explosions.push(explosion);
+  for (const enemy of state.enemies) {
+    if (!enemy.alive) continue;
+    const enemyZ = groundElevation(enemy.x, enemy.y) + enemy.z + 18;
+    const distance = Math.hypot(enemy.x - explosion.x, enemy.y - explosion.y, enemyZ - explosion.z);
+    if (distance <= meter && blastPathClear(explosion, enemy)) {
+      enemy.health = Math.max(0, enemy.health - 50);
+      enemy.alive = enemy.health > 0;
+    }
+  }
+  const defeated = state.enemies.filter((enemy) => !enemy.alive).length;
+  setStatus(defeated ? `Bomb impact - ${defeated} slime${defeated === 1 ? "" : "s"} defeated` : "Bomb impact");
+}
+
+function updateBombs(delta) {
+  for (const projectile of state.projectiles) {
+    if (projectile.exploded) continue;
+    if (projectile.releaseDelay > 0) {
+      projectile.releaseDelay -= delta;
+      projectile.x = state.player.x;
+      projectile.y = state.player.y;
+      projectile.z = state.player.floorZ + state.player.z + 58;
+      if (projectile.releaseDelay > 0) continue;
+      projectile.released = true;
+    }
+    const previousX = projectile.x;
+    const previousY = projectile.y;
+    const previousZ = projectile.z;
+    const nextX = projectile.x + projectile.vx * delta;
+    const nextY = projectile.y + projectile.vy * delta;
+    const nextZ = projectile.z + projectile.vz * delta;
+    projectile.vz -= gravity * delta;
+    const hitWall = !pointInWalkable(nextX, nextY, 5) ||
+      level.columns.some((column) => Math.hypot(nextX - column.x, nextY - column.y) < 25 && nextZ < 76);
+    const floorZ = groundElevation(nextX, nextY);
+    if (hitWall || nextZ <= floorZ + 5) {
+      projectile.x = hitWall ? previousX : nextX;
+      projectile.y = hitWall ? previousY : nextY;
+      projectile.z = hitWall ? previousZ : floorZ;
+      projectile.exploded = true;
+      explodeBomb(projectile);
+    } else {
+      projectile.x = nextX;
+      projectile.y = nextY;
+      projectile.z = nextZ;
+    }
+  }
+  state.projectiles = state.projectiles.filter((projectile) => !projectile.exploded);
+  for (const explosion of state.explosions) explosion.age += delta;
+  state.explosions = state.explosions.filter((explosion) => explosion.age < explosion.duration);
+}
+
+function drawBombEffects() {
+  effectsLayer.clear();
+  for (const projectile of state.projectiles) {
+    if (!projectile.released) continue;
+    const p = worldToScreen(projectile.x, projectile.y, projectile.z);
+    effectsLayer.circle(p.x, p.y, 9 * state.zoom).fill(0x15120f).stroke({ color: 0x8e7856, width: 2 * state.zoom });
+    effectsLayer.moveTo(p.x + 3 * state.zoom, p.y - 7 * state.zoom)
+      .lineTo(p.x + 7 * state.zoom, p.y - 14 * state.zoom)
+      .stroke({ color: 0xd9b36b, width: 2 * state.zoom });
+    effectsLayer.circle(p.x + 8 * state.zoom, p.y - 15 * state.zoom, 4 * state.zoom).fill(0xff8a35);
+  }
+  for (const explosion of state.explosions) {
+    const progress = explosion.age / explosion.duration;
+    const p = worldToScreen(explosion.x, explosion.y, explosion.z);
+    const radius = meter * state.zoom * Math.sin(progress * Math.PI);
+    effectsLayer.ellipse(p.x, p.y, radius, radius * state.projectionY)
+      .fill({ color: 0xf06a24, alpha: 0.28 * (1 - progress) })
+      .stroke({ color: 0xffcf6a, width: 4 * state.zoom, alpha: 0.8 * (1 - progress) });
+    effectsLayer.circle(p.x, p.y - radius * 0.3, radius * 0.48)
+      .fill({ color: 0xffa43b, alpha: 0.38 * (1 - progress) });
+    for (let i = 0; i < 8; i += 1) {
+      const angle = i * Math.PI / 4 + progress;
+      effectsLayer.circle(p.x + Math.cos(angle) * radius * 0.78, p.y + Math.sin(angle) * radius * 0.42, 3 * state.zoom)
+        .fill({ color: i % 2 ? 0xffd27a : 0xb9381f, alpha: 1 - progress });
+    }
+  }
+}
+
 function update(delta) {
   let mx = 0;
   let my = 0;
@@ -854,9 +1382,37 @@ function update(delta) {
   if (state.keys.has("ArrowRight") || state.keys.has("KeyD")) mx += 1;
 
   const player = state.player;
-  const moving = mx !== 0 || my !== 0;
+  let moving = mx !== 0 || my !== 0;
   const sprinting = state.keys.has("ShiftLeft") || state.keys.has("ShiftRight");
-  if (moving) {
+  const tutorial = state.tutorial;
+
+  if (tutorial?.portalActive && !tutorial.portalDive && Math.hypot(player.x - tutorial.portal.x, player.y - tutorial.portal.y) <= 1.25 * meter) {
+    tutorial.portalPull = true;
+  }
+
+  if (tutorial?.portalPull && !tutorial.portalDive) {
+    const dx = tutorial.portal.x - player.x;
+    const dy = tutorial.portal.y - player.y;
+    const distance = Math.hypot(dx, dy);
+    moving = true;
+    if (distance > 0.1 * meter) {
+      const travel = Math.min(player.speed * 1.15 * delta, distance);
+      movePlayer(dx / distance * travel, dy / distance * travel);
+      player.heading = Math.atan2(dy, dx);
+      player.stride += delta * 14;
+    } else {
+      player.x = tutorial.portal.x;
+      player.y = tutorial.portal.y;
+      player.grounded = false;
+      player.vz = 500;
+      player.jumpAge = 0;
+      player.jumpArm = 1;
+      tutorial.portalDive = true;
+      tutorial.portalDiveTime = 0;
+      tutorial.portalHidden = false;
+      startTransition("level1.html?fade=1", 0.28);
+    }
+  } else if (moving && !tutorial?.portalDive && player.rollTime <= 0) {
     const len = Math.hypot(mx, my);
     mx /= len;
     my /= len;
@@ -865,11 +1421,21 @@ function update(delta) {
     const worldMove = rotate(mx, my, state.yaw);
     const stanceSpeed = player.stance === "crawl" ? 0.28 : player.stance === "crouch" ? 0.45 : 1;
     const speed = player.speed * (sprinting && player.stance === "stand" ? 1.75 : 1) * stanceSpeed;
-    movePlayer(worldMove.x * speed * delta, worldMove.y * speed * delta);
+    const distance = movePlayer(worldMove.x * speed * delta, worldMove.y * speed * delta);
+    if (tutorial && tutorial.step === 1 && sprinting && !tutorial.advancing) {
+      tutorial.sprintDistance += distance;
+      refreshTutorialHud();
+      if (tutorial.sprintDistance >= 3 * meter) completeTutorialStep(1);
+    }
     player.heading = Math.atan2(worldMove.y, worldMove.x);
     player.stride += delta * (sprinting ? 12 : 15);
   } else {
     player.stride *= Math.pow(0.0008, delta);
+  }
+
+  if (tutorial?.portalDive) {
+    tutorial.portalDiveTime += delta;
+    if (tutorial.portalDiveTime >= 0.2) tutorial.portalHidden = true;
   }
 
   if (player.rollTime > 0) {
@@ -887,6 +1453,11 @@ function update(delta) {
       player.vz = 0;
       player.jumpAge = 0;
       player.grounded = true;
+      player.landTime = 0.18;
+      if (tutorial?.jumpStarted && tutorial.step === 2) {
+        tutorial.jumpStarted = false;
+        completeTutorialStep(2);
+      }
     }
   }
   player.jumpArm += ((player.grounded ? 0 : clamp(1 - player.jumpAge / 0.34, 0, 1)) - player.jumpArm) * (1 - Math.exp(-(player.grounded ? 18 : 24) * delta));
@@ -894,6 +1465,7 @@ function update(delta) {
   player.specialTime = Math.max(0, player.specialTime - delta);
   player.interactTime = Math.max(0, player.interactTime - delta);
   player.bombThrowTime = Math.max(0, player.bombThrowTime - delta);
+  player.landTime = Math.max(0, player.landTime - delta);
 
   if (level.kind === "dungeon") {
     player.floorZ = groundElevation(player.x, player.y);
@@ -901,13 +1473,17 @@ function update(delta) {
     const targetZoom = pointInRect(player.x, player.y, level.bounds[1], 26) ? 1.65 : 1;
     state.zoom += (targetZoom - state.zoom) * (1 - Math.exp(-5 * delta));
     if (!state.transitioning && player.floorZ >= level.platformHeight * 0.85 && pointInRect(player.x, player.y, level.exit, 10)) {
-      state.transitioning = true;
-      state.fade = 0;
+      startTransition("level0.html?fade=1");
     }
-    if (state.transitioning) {
-      state.fade = Math.min(1, state.fade + delta);
-      if (state.fade >= 1) window.location.href = "level0.html?fade=1";
-    }
+  }
+
+  updateBombs(delta);
+  updateEnemies(delta);
+
+  if (state.transitioning) {
+    state.transitionDelay = Math.max(0, state.transitionDelay - delta);
+    if (state.transitionDelay === 0) state.fade = Math.min(1, state.fade + delta);
+    if (state.fade >= 1 && state.transitionTarget) window.location.href = state.transitionTarget;
   } else if (state.fade > 0) {
     state.fade = Math.max(0, state.fade - delta);
   }
@@ -915,21 +1491,32 @@ function update(delta) {
 
 function movePlayer(dx, dy) {
   const player = state.player;
+  const startX = player.x;
+  const startY = player.y;
   const nextX = player.x + dx;
   const nextY = player.y + dy;
   const maxStepHeight = 18;
   let currentElevation = groundElevation(player.x, player.y);
+  let airborneWorldZ = currentElevation + player.z;
+  const canTraverse = (elevation) => player.grounded
+    ? Math.abs(elevation - currentElevation) <= maxStepHeight
+    : elevation <= airborneWorldZ + 2;
+  const applyElevation = (elevation) => {
+    if (!player.grounded) player.z = Math.max(0, airborneWorldZ - elevation);
+    currentElevation = elevation;
+  };
   const nextXElevation = groundElevation(nextX, player.y);
-  if (pointInWalkable(nextX, player.y, 16) && Math.abs(nextXElevation - currentElevation) <= maxStepHeight) {
+  if (pointInWalkable(nextX, player.y, 16) && canTraverse(nextXElevation)) {
     player.x = nextX;
-    currentElevation = nextXElevation;
+    applyElevation(nextXElevation);
   }
   const nextYElevation = groundElevation(player.x, nextY);
-  if (pointInWalkable(player.x, nextY, 16) && Math.abs(nextYElevation - currentElevation) <= maxStepHeight) {
+  if (pointInWalkable(player.x, nextY, 16) && canTraverse(nextYElevation)) {
     player.y = nextY;
-    currentElevation = nextYElevation;
+    applyElevation(nextYElevation);
   }
   player.floorZ = currentElevation;
+  return Math.hypot(player.x - startX, player.y - startY);
 }
 
 function collectItems() {
@@ -952,27 +1539,41 @@ function collectItems() {
 function render() {
   g.clear();
   overlay.clear();
+  occlusionLayer.clear();
   floorSpriteCount = 0;
   if (level.kind === "infinite") drawInfiniteFloor();
+  else if (level.kind === "tutorial") drawTutorialFloor();
   else drawDungeonFloor();
   for (let i = floorSpriteCount; i < floorLayer.children.length; i += 1) floorLayer.children[i].visible = false;
   drawLight();
   drawCharacter();
+  drawEnemies();
+  drawBombEffects();
+  drawForegroundOccluders();
+  if (state.player.hitFlash > 0) {
+    overlay.rect(0, 0, state.width, state.height).fill({ color: 0x8e1914, alpha: state.player.hitFlash * 0.6 });
+  }
   if (state.fade > 0) overlay.rect(0, 0, state.width, state.height).fill({ color: 0x000000, alpha: state.fade });
 }
 
 function chooseItem(slot) {
+  if (isTutorial && state.tutorial.step === 5 && slot !== 4) {
+    setStatus("Select bomb with 4");
+    return;
+  }
   hud.itemMenu.classList.add("hidden");
   if (slot === 4) {
     if (state.inventory.bombs > 0) {
       state.player.holdingBomb = true;
       setStatus("Bomb ready");
+      if (isTutorial && state.tutorial.step === 5) completeTutorialStep(5);
     } else setStatus("No bombs");
     return;
   }
   const type = ["health", "mana", "magic"][slot - 1];
   if (state.inventory[type] > 0) {
     state.inventory[type] -= 1;
+    if (type === "health") state.player.health = Math.min(state.player.maxHealth, state.player.health + 35);
     refreshInventory();
     setStatus(`Used ${type}`);
   } else setStatus(`No ${type}`);
@@ -980,17 +1581,51 @@ function chooseItem(slot) {
 
 function useWeapon() {
   state.player.attackTime = 0.28;
-  setStatus(state.player.holdingBomb ? "Sword with bomb" : "Sword strike");
+  const forwardX = Math.cos(state.player.heading);
+  const forwardY = Math.sin(state.player.heading);
+  const target = state.enemies
+    .filter((enemy) => enemy.alive)
+    .map((enemy) => {
+      const dx = enemy.x - state.player.x;
+      const dy = enemy.y - state.player.y;
+      const distance = Math.hypot(dx, dy);
+      const facing = distance > 0 ? (dx * forwardX + dy * forwardY) / distance : 1;
+      const sameHeight = Math.abs((groundElevation(enemy.x, enemy.y) + enemy.z) - (state.player.floorZ + state.player.z)) < 58;
+      return { enemy, distance, facing, sameHeight };
+    })
+    .filter((candidate) => candidate.distance <= 100 && candidate.facing >= 0.15 && candidate.sameHeight)
+    .sort((a, b) => a.distance - b.distance)[0]?.enemy;
+  if (target) {
+    target.health = Math.max(0, target.health - 25);
+    target.alive = target.health > 0;
+    setStatus(target.alive ? `${target.name}: ${target.health} health` : `${target.name} defeated`);
+  } else {
+    setStatus(state.player.holdingBomb ? "Sword with bomb" : "Sword strike");
+  }
+  if (isTutorial && state.tutorial.step === 3) completeTutorialStep(3);
 }
 
 function specialAction() {
   if (state.player.holdingBomb) {
+    const heading = state.player.heading;
     state.player.holdingBomb = false;
     state.inventory.bombs = Math.max(0, state.inventory.bombs - 1);
-    state.player.bombThrowTime = 0.5;
-    state.player.specialTime = 0.3;
+    state.player.bombThrowTime = bombThrowDuration;
+    state.player.specialTime = bombThrowDuration;
+    state.projectiles.push({
+      x: state.player.x,
+      y: state.player.y,
+      z: state.player.floorZ + state.player.z + 58,
+      vx: Math.cos(heading) * 520,
+      vy: Math.sin(heading) * 520,
+      vz: 390,
+      releaseDelay: bombReleaseTime,
+      released: false,
+      exploded: false
+    });
     refreshInventory();
     setStatus("Bomb thrown");
+    if (isTutorial && state.tutorial.step === 6) completeTutorialStep(6);
   } else {
     state.player.specialTime = 0.35;
     setStatus("Special action");
@@ -1019,11 +1654,19 @@ window.addEventListener("resize", () => {
 window.addEventListener("keydown", (event) => {
   if (!hud.itemMenu.classList.contains("hidden") && ["Digit1", "Digit2", "Digit3", "Digit4"].includes(event.code)) {
     event.preventDefault();
+    if (!tutorialActionUnlocked("selectItem")) {
+      setStatus("Complete the current lesson");
+      return;
+    }
     chooseItem(Number(event.code.slice(-1)));
     return;
   }
   if (event.code === "Space") {
     event.preventDefault();
+    if (!tutorialActionUnlocked("jump")) {
+      setStatus("Complete the current lesson");
+      return;
+    }
     const player = state.player;
     const moving = isMoving();
     if (player.stance === "crawl") {
@@ -1032,10 +1675,14 @@ window.addEventListener("keydown", (event) => {
       return;
     }
     if (player.stance === "crouch" && moving) {
-      player.rollTime = 0.45;
+      player.rollTime = 0.55;
       player.rollX = player.lastMoveX;
       player.rollY = player.lastMoveY;
       player.stance = "stand";
+      player.grounded = false;
+      player.vz = 360;
+      player.jumpAge = 0;
+      player.jumpArm = 0;
       setStatus("Jump roll");
       return;
     }
@@ -1044,29 +1691,69 @@ window.addEventListener("keydown", (event) => {
       player.vz = player.stance === "crouch" ? 426 : 520;
       player.jumpAge = 0;
       player.jumpArm = 1;
+      if (isTutorial && state.tutorial.step === 2) state.tutorial.jumpStarted = true;
     }
     return;
   }
   if (event.code === "ControlLeft") {
     event.preventDefault();
+    if (isTutorial && !state.tutorial.portalActive) {
+      setStatus("Complete training first");
+      return;
+    }
     toggleCrouch(isMoving());
+    return;
+  }
+  if (event.code === "KeyQ" && !event.repeat) {
+    event.preventDefault();
+    if (isTutorial && !state.tutorial.portalActive) {
+      setStatus("Complete training first");
+      return;
+    }
+    state.player.stealth = !state.player.stealth;
+    setStatus(state.player.stealth ? "Stealth mode" : "Stealth off");
     return;
   }
   if (event.code === "KeyE") {
     event.preventDefault();
+    if (!tutorialActionUnlocked("items")) {
+      setStatus("Complete the current lesson");
+      return;
+    }
     hud.itemMenu.classList.toggle("hidden");
     setStatus(hud.itemMenu.classList.contains("hidden") ? "World mode" : "Choose 1-4");
+    if (isTutorial && state.tutorial.step === 4 && !hud.itemMenu.classList.contains("hidden")) completeTutorialStep(4);
     return;
   }
   if (event.code === "KeyF") {
     event.preventDefault();
+    if (isTutorial && !state.tutorial.portalActive) {
+      setStatus("Complete training first");
+      return;
+    }
     state.player.interactTime = 0.3;
     setStatus("Interact");
+    return;
+  }
+  if (["ShiftLeft", "ShiftRight"].includes(event.code) && !tutorialActionUnlocked("sprint")) {
+    event.preventDefault();
+    setStatus("Complete the current lesson");
     return;
   }
   if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "KeyW", "KeyA", "KeyS", "KeyD", "ShiftLeft", "ShiftRight"].includes(event.code)) {
     event.preventDefault();
     state.keys.add(event.code);
+    if (isTutorial && state.tutorial.step === 0 && !state.tutorial.advancing) {
+      const direction = {
+        ArrowUp: "up", KeyW: "up", ArrowDown: "down", KeyS: "down",
+        ArrowLeft: "left", KeyA: "left", ArrowRight: "right", KeyD: "right"
+      }[event.code];
+      if (direction) {
+        state.tutorial.movementKeys.add(direction);
+        refreshTutorialHud();
+        if (state.tutorial.movementKeys.size === 4) completeTutorialStep(0);
+      }
+    }
   }
 });
 
@@ -1077,8 +1764,14 @@ app.canvas.addEventListener("click", () => {
 });
 
 app.canvas.addEventListener("mousedown", (event) => {
-  if (event.button === 0) useWeapon();
-  if (event.button === 2) specialAction();
+  if (event.button === 0) {
+    if (tutorialActionUnlocked("attack")) useWeapon();
+    else setStatus("Complete the current lesson");
+  }
+  if (event.button === 2) {
+    if (tutorialActionUnlocked("special")) specialAction();
+    else setStatus("Complete the current lesson");
+  }
 });
 app.canvas.addEventListener("contextmenu", (event) => event.preventDefault());
 
@@ -1094,6 +1787,7 @@ window.addEventListener("mousemove", (event) => {
 });
 
 refreshInventory();
+refreshTutorialHud();
 let lastTime = performance.now();
 app.ticker.add(() => {
   const now = performance.now();

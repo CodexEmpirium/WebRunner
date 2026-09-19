@@ -143,6 +143,93 @@ canvas {
   text-transform: uppercase;
 }
 
+.tutorial-title {
+  padding-right: 14px;
+  border-right: 1px solid rgba(181, 150, 85, 0.3);
+  color: var(--brass-light);
+  font: 700 13px Georgia, serif;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.tutorial-panel {
+  position: absolute;
+  top: 82px;
+  left: 50%;
+  display: grid;
+  grid-template-columns: 92px minmax(230px, 1fr) auto;
+  width: min(680px, calc(100vw - 32px));
+  min-height: 76px;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 18px 15px;
+  border-top: 1px solid rgba(234, 215, 158, 0.44);
+  border-bottom: 1px solid rgba(181, 150, 85, 0.5);
+  background: linear-gradient(90deg, rgba(8, 8, 7, 0.9), rgba(35, 31, 25, 0.94), rgba(8, 8, 7, 0.9));
+  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.52);
+  transform: translateX(-50%);
+}
+
+.tutorial-count {
+  color: var(--muted);
+  font: 700 9px Georgia, serif;
+  text-transform: uppercase;
+}
+
+.tutorial-copy { min-width: 0; }
+
+.tutorial-copy strong,
+.tutorial-copy span {
+  display: block;
+}
+
+.tutorial-copy strong {
+  margin-bottom: 3px;
+  color: #f5dfaa;
+  font: 700 16px Georgia, serif;
+}
+
+.tutorial-copy span {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.tutorial-command {
+  min-width: 112px;
+  padding: 9px 12px;
+  border: 1px solid #080706;
+  outline: 1px solid rgba(181, 150, 85, 0.62);
+  background: #12130f;
+  color: var(--brass-light);
+  font: 700 10px Georgia, serif;
+  text-align: center;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.tutorial-progress {
+  position: absolute;
+  right: 18px;
+  bottom: 7px;
+  left: 18px;
+  height: 3px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.72);
+}
+
+.tutorial-progress i {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: linear-gradient(90deg, #6d2821, var(--brass-light));
+  transition: width 180ms ease;
+}
+
+.tutorial-concealed { visibility: hidden; }
+.tutorial-hud .item-menu { top: 170px; }
+
 .item-menu {
   position: absolute;
   top: 82px;
@@ -289,10 +376,31 @@ canvas {
   .status-line { min-width: auto; }
   .hint { bottom: 12px; transform: scale(0.8); transform-origin: bottom left; }
   .hint-right { transform-origin: bottom right; }
+  .tutorial-panel { top: 92px; }
+  .tutorial-hud .item-menu { top: 186px; }
 }
 
 @media (max-width: 560px) {
   .status-line { display: none; }
   .inventory { width: 100%; justify-content: center; }
   .hint-right { display: none; }
+  .tutorial-title { border-right: 0; padding-right: 0; }
+  .tutorial-panel {
+    top: 92px;
+    grid-template-columns: 1fr auto;
+    gap: 7px 12px;
+    min-height: 92px;
+    padding: 10px 14px 15px;
+  }
+  .tutorial-count { grid-column: 1 / 3; }
+  .tutorial-copy strong { font-size: 14px; }
+  .tutorial-copy span { font-size: 10px; }
+  .tutorial-command { min-width: 86px; padding: 8px; font-size: 9px; }
+  .tutorial-progress { right: 14px; left: 14px; }
+  .tutorial-hud .item-menu {
+    top: 196px;
+    max-width: calc(100vw - 24px);
+    flex-wrap: wrap;
+    justify-content: center;
+  }
 }
