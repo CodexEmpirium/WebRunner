@@ -3,6 +3,8 @@ const { Application, Container, Graphics, Matrix, Rectangle, Sprite, Texture } =
 const levelKey = document.body.dataset.level || "1";
 const isTutorial = levelKey === "tutorial";
 const levelId = isTutorial ? null : Number(levelKey);
+const query = new URLSearchParams(window.location.search);
+const isAssetPreload = query.get("preload") === "1";
 const availableLevels = [0, 1];
 const meter = 48;
 const tile = 64;
@@ -11,6 +13,31 @@ const maxPitch = Math.PI * 7 / 18;
 const bombThrowDuration = 0.82;
 const bombReleaseTime = 0.47;
 const gravity = 980;
+const progressStorageKey = "webrunner-progress-v1";
+
+function readProgress() {
+  let stored = {};
+  try {
+    stored = JSON.parse(window.sessionStorage.getItem(progressStorageKey) || "{}");
+  } catch {
+    stored = {};
+  }
+  const numberValue = (name, fallback, minimum = 0, maximum = 9999) => {
+    const value = Number(query.get(name) ?? stored[name]);
+    return Number.isFinite(value) ? Math.max(minimum, Math.min(maximum, value)) : fallback;
+  };
+  return {
+    hp: numberValue("hp", 100, 0, 100),
+    coins: numberValue("coins", 0),
+    health: numberValue("health", 0),
+    mana: numberValue("mana", 0),
+    magic: numberValue("magic", 0),
+    bombs: numberValue("bombs", 3),
+    holdingBomb: (query.get("holdingBomb") ?? stored.holdingBomb) === "1"
+  };
+}
+
+const savedProgress = readProgress();
 
 const state = {
   width: window.innerWidth,
@@ -19,14 +46,15 @@ const state = {
   pitch: Math.PI / 4,
   projectionY: Math.sin(Math.PI / 4),
   zoom: 1,
-  fade: new URLSearchParams(window.location.search).get("fade") === "1" ? 1 : 0,
+  fade: query.get("fade") === "1" ? 1 : 0,
   transitioning: false,
   transitionTarget: null,
   transitionDelay: 0,
   keys: new Set(),
   projectiles: [],
   explosions: [],
-  inventory: { coins: 0, health: 0, mana: 0, magic: 0, bombs: 3 },
+  scorches: [],
+  inventory: { coins: savedProgress.coins, health: savedProgress.health, mana: savedProgress.mana, magic: savedProgress.magic, bombs: savedProgress.bombs },
   player: {
     x: 0,
     y: levelId === 1 ? 360 : 0,
@@ -43,16 +71,17 @@ const state = {
     rollTime: 0,
     rollX: 0,
     rollY: -1,
+    rollDirection: 1,
     attackTime: 0,
     specialTime: 0,
     interactTime: 0,
-    holdingBomb: false,
+    holdingBomb: savedProgress.holdingBomb && savedProgress.bombs > 0,
     stealth: false,
     bombThrowTime: 0,
     landTime: 0,
     lastMoveX: 0,
     lastMoveY: -1,
-    health: 100,
+    health: savedProgress.hp,
     maxHealth: 100,
     contactDamageCooldown: 0,
     hitFlash: 0
@@ -63,12 +92,15 @@ const state = {
     movementKeys: new Set(),
     sprintDistance: 0,
     jumpStarted: false,
+    stanceActions: new Set(),
+    lowMovement: new Set(),
+    crouchJumpStarted: false,
     portalActive: false,
     portalPull: false,
     portalDive: false,
     portalDiveTime: 0,
     portalHidden: false,
-    portal: { x: 0, y: -10 * meter }
+    portal: { x: 0, y: 0 }
   } : null
 };
 const levels = {
@@ -168,19 +200,40 @@ state.enemies = (level.enemies || []).map((enemy, index) => ({
   jumpClock: enemy.phase * 1.7,
   cycleDuration: 1.7,
   alive: true,
+  deathTime: 0,
+  removed: false,
   visual: null
 }));
 const tutorialSteps = [
   { title: "Movement", instruction: "Move once in every direction.", command: "W A S D" },
   { title: "Sprint", instruction: "Hold Shift while moving for 3 meters.", command: "SHIFT + W A S D" },
   { title: "Jump", instruction: "Jump and land on your feet.", command: "SPACE" },
+  { title: "Stay Low", instruction: "Crouch, then enter a crawl while moving.", command: "LEFT CTRL" },
+  { title: "Low Movement", instruction: "Move while crouched and while crawling.", command: "W A S D + LEFT CTRL" },
+  { title: "Crouch Jump", instruction: "Crouch, move forward or backward, then jump.", command: "LEFT CTRL + W/S + SPACE" },
   { title: "Attack", instruction: "Strike once with your sword.", command: "LEFT CLICK" },
   { title: "Item Belt", instruction: "Open your item belt.", command: "E" },
   { title: "Ready Bomb", instruction: "Select the bomb from your item belt.", command: "4" },
   { title: "Throw Bomb", instruction: "Throw the readied bomb.", command: "RIGHT CLICK" }
 ];
-const hud = buildHud(levelId);
+const tutorialStep = {
+  movement: 0,
+  sprint: 1,
+  jump: 2,
+  stances: 3,
+  lowMovement: 4,
+  crouchJump: 5,
+  attack: 6,
+  items: 7,
+  selectItem: 8,
+  special: 9
+};
+const hud = isAssetPreload ? null : buildHud(levelId);
 const art = await loadArt();
+if (isAssetPreload) {
+  window.parent.postMessage({ type: "webrunner-assets-ready", level: levelKey }, "*");
+  return;
+}
 const app = new Application();
 await app.init({
   resizeTo: window,
@@ -195,20 +248,27 @@ const overlay = new Graphics();
 app.stage.addChild(world, overlay);
 
 const floorLayer = new Container();
+const waterLayer = new Container();
 const g = new Graphics();
+const scenerySpriteLayer = new Container();
+const elevatedLayer = new Graphics();
 const actorLayer = new Container();
 const actorShadow = new Graphics();
 const actorSprite = new Sprite(art.action[0][0]);
 const actorFx = new Graphics();
 const entityLayer = new Container();
 const effectsLayer = new Graphics();
+const occlusionSpriteLayer = new Container();
 const occlusionLayer = new Graphics();
 actorSprite.anchor.set(0.5, 0.9);
 actorLayer.addChild(actorShadow, actorSprite, actorFx);
 entityLayer.sortableChildren = true;
 entityLayer.addChild(actorLayer);
-world.addChild(floorLayer, g, entityLayer, effectsLayer, occlusionLayer);
+world.addChild(floorLayer, waterLayer, g, scenerySpriteLayer, elevatedLayer, entityLayer, effectsLayer, occlusionSpriteLayer, occlusionLayer);
 let floorSpriteCount = 0;
+const waterSprites = [];
+const scenerySprites = new Map();
+const occlusionSprites = new Map();
 
 async function loadArt() {
   const loadImage = (path) => new Promise((resolve, reject) => {
@@ -217,17 +277,22 @@ async function loadArt() {
     image.onerror = () => reject(new Error(`Unable to load artwork: ${path}`));
     image.src = new URL(path, window.location.href).href;
   });
-  const [runImage, runStealthImage, actionImage, lowImage, crawlImage, bombImage, bombCombatImage, slimeImage, floorImage, wallImage] = await Promise.all([
+  const [runImage, runStealthImage, actionImage, lowImage, crawlImage, bombImage, bombWalkImage, bombCombatImage, slimeImage, slimeDeathImage, floorImage, wallImage, columnImage, coinImage, waterImage] = await Promise.all([
     loadImage("./assets/art/rogue-run-v3-clean.png"),
     loadImage("./assets/art/rogue-run-stealth-v2-clean.png"),
     loadImage("./assets/art/rogue-action-v2-clean.png"),
-    loadImage("./assets/art/rogue-low-v2-clean.png"),
+    loadImage("./assets/art/rogue-crouch-v1-clean.png"),
     loadImage("./assets/art/rogue-crawl-v3-clean.png"),
     loadImage("./assets/art/rogue-bomb-v3-clean.png"),
+    loadImage("./assets/art/rogue-bomb-walk-v1-clean.png"),
     loadImage("./assets/art/rogue-bomb-v2-clean.png"),
     loadImage("./assets/art/enemy-dungeon-slime-clean.png"),
+    loadImage("./assets/art/enemy-dungeon-slime-death-v1-clean.png"),
     loadImage("./assets/art/dungeon-floor.png"),
-    loadImage("./assets/art/dungeon-wall.png")
+    loadImage("./assets/art/dungeon-wall.png"),
+    loadImage("./assets/art/level1-column-v1.png"),
+    loadImage("./assets/art/level1-coin-spin-v1-clean.png"),
+    loadImage("./assets/art/level1-water-v1.png")
   ]);
   const sliceSheet = (image, columns, rows, horizontalInset = 0) => {
     const base = Texture.from(image);
@@ -245,8 +310,10 @@ async function loadArt() {
   };
   const floor = Texture.from(floorImage);
   const wall = Texture.from(wallImage);
+  const water = Texture.from(waterImage);
   floor.source.addressMode = "repeat";
   wall.source.addressMode = "repeat";
+  water.source.addressMode = "repeat";
   return {
     run: sliceSheet(runImage, 8, 8),
     runStealth: sliceSheet(runStealthImage, 4, 8),
@@ -254,10 +321,15 @@ async function loadArt() {
     low: sliceSheet(lowImage, 6, 8),
     crawl: sliceSheet(crawlImage, 6, 8),
     bomb: sliceSheet(bombImage, 7, 8),
+    bombWalk: sliceSheet(bombWalkImage, 6, 8),
     bombCombat: sliceSheet(bombCombatImage, 3, 8),
     slime: sliceSheet(slimeImage, 8, 8),
+    slimeDeath: sliceSheet(slimeDeathImage, 4, 8),
+    column: Texture.from(columnImage),
+    coin: sliceSheet(coinImage, 8, 1)[0],
     floor,
-    wall
+    wall,
+    water
   };
 }
 
@@ -265,7 +337,8 @@ function buildHud(currentLevel) {
   const root = document.createElement("div");
   root.className = `hud${isTutorial ? " tutorial-hud" : ""}`;
   const levelControl = isTutorial ? `
-      <div class="tutorial-title">Initiate's Trial</div>` : `
+      <div class="tutorial-title">Initiate's Trial</div>
+      <button class="skip-tutorial" id="skipTutorial" type="button">Skip Tutorial</button>` : `
       <form class="level-jump" id="levelJump">
         <label for="levelInput">Go to Level</label>
         <input id="levelInput" type="number" inputmode="numeric" min="0" max="1" step="1" value="${currentLevel}">
@@ -301,6 +374,16 @@ function buildHud(currentLevel) {
       <span>3 Magic</span>
       <span>4 Bomb</span>
     </div>
+    ${isTutorial ? `
+    <div class="confirm-overlay hidden" id="skipConfirm">
+      <section class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="skipConfirmTitle">
+        <strong id="skipConfirmTitle">Skip Tutorial and Start Level 1: Are you sure?</strong>
+        <div class="confirm-actions">
+          <button type="button" id="confirmSkip">Ok</button>
+          <button type="button" id="cancelSkip">Cancel</button>
+        </div>
+      </section>
+    </div>` : ""}
     <div class="hint hint-left">
       <div class="keys">
         <div class="key key-up">&#9650;</div>
@@ -338,6 +421,27 @@ function buildHud(currentLevel) {
   refs.tutorialProgress = root.querySelector("#tutorialProgress");
   refs.spaceHint = root.querySelector("#spaceHint");
   refs.movementHint = root.querySelector("#movementHint");
+  refs.skipTutorial = root.querySelector("#skipTutorial");
+  refs.skipConfirm = root.querySelector("#skipConfirm");
+  refs.confirmSkip = root.querySelector("#confirmSkip");
+  refs.cancelSkip = root.querySelector("#cancelSkip");
+
+  if (refs.skipTutorial) {
+    const closeSkipConfirmation = () => refs.skipConfirm.classList.add("hidden");
+    refs.skipTutorial.addEventListener("click", () => {
+      if (document.pointerLockElement) document.exitPointerLock();
+      refs.skipConfirm.classList.remove("hidden");
+      refs.cancelSkip.focus();
+    });
+    refs.cancelSkip.addEventListener("click", closeSkipConfirmation);
+    refs.confirmSkip.addEventListener("click", () => {
+      refs.skipConfirm.classList.add("hidden");
+      startTransition("level1.html?fade=1");
+    });
+    refs.skipConfirm.addEventListener("click", (event) => {
+      if (event.target === refs.skipConfirm) closeSkipConfirmation();
+    });
+  }
 
   if (refs.levelInput) {
     refs.levelInput.addEventListener("input", () => {
@@ -350,7 +454,7 @@ function buildHud(currentLevel) {
         refs.levelInput.value = String(currentLevel);
         return;
       }
-      window.location.href = `level${target}.html`;
+      window.location.href = targetWithProgress(`level${target}.html`);
     });
   }
   return refs;
@@ -371,7 +475,7 @@ function setStatus(text) {
 
 function tutorialActionUnlocked(action) {
   if (!isTutorial || state.tutorial.portalActive) return true;
-  const unlockStep = { movement: 0, sprint: 1, jump: 2, attack: 3, items: 4, selectItem: 5, special: 6 };
+  const unlockStep = { ...tutorialStep, stance: tutorialStep.stances };
   return state.tutorial.step >= unlockStep[action];
 }
 
@@ -379,8 +483,10 @@ function tutorialProgress() {
   if (!isTutorial) return 0;
   const tutorial = state.tutorial;
   if (tutorial.advancing) return 1;
-  if (tutorial.step === 0) return tutorial.movementKeys.size / 4;
-  if (tutorial.step === 1) return clamp(tutorial.sprintDistance / (3 * meter), 0, 1);
+  if (tutorial.step === tutorialStep.movement) return tutorial.movementKeys.size / 4;
+  if (tutorial.step === tutorialStep.sprint) return clamp(tutorial.sprintDistance / (3 * meter), 0, 1);
+  if (tutorial.step === tutorialStep.stances) return tutorial.stanceActions.size / 2;
+  if (tutorial.step === tutorialStep.lowMovement) return tutorial.lowMovement.size / 2;
   return 0;
 }
 
@@ -403,8 +509,14 @@ function refreshTutorialHud() {
   hud.tutorialInstruction.textContent = tutorial.advancing ? "Preparing the next lesson..." : lesson.instruction;
   hud.tutorialCommand.textContent = tutorial.advancing ? "COMPLETE" : lesson.command;
   hud.tutorialProgress.style.width = `${tutorialProgress() * 100}%`;
-  if (tutorial.step >= 2) hud.spaceHint.classList.remove("tutorial-concealed");
-  hud.movementHint.textContent = tutorial.step === 0 ? "Movement unlocked" : tutorial.step === 1 ? "Sprint unlocked" : "Move jump sprint";
+  if (tutorial.step >= tutorialStep.jump) hud.spaceHint.classList.remove("tutorial-concealed");
+  hud.movementHint.textContent = tutorial.step === tutorialStep.movement
+    ? "Movement unlocked"
+    : tutorial.step === tutorialStep.sprint
+      ? "Sprint unlocked"
+      : tutorial.step >= tutorialStep.stances
+        ? "Move jump sprint crouch"
+        : "Move jump sprint";
 }
 
 function completeTutorialStep(expectedStep) {
@@ -427,12 +539,58 @@ function completeTutorialStep(expectedStep) {
   }, 650);
 }
 
+function gameProgress() {
+  return {
+    hp: state.player.health,
+    coins: state.inventory.coins,
+    health: state.inventory.health,
+    mana: state.inventory.mana,
+    magic: state.inventory.magic,
+    bombs: state.inventory.bombs,
+    holdingBomb: state.player.holdingBomb ? "1" : "0"
+  };
+}
+
+function saveProgress() {
+  try {
+    window.sessionStorage.setItem(progressStorageKey, JSON.stringify(gameProgress()));
+  } catch {
+    // URL parameters still carry progress when local-file storage is unavailable.
+  }
+}
+
+function targetWithProgress(target) {
+  const url = new URL(target, window.location.href);
+  for (const [name, value] of Object.entries(gameProgress())) url.searchParams.set(name, String(value));
+  saveProgress();
+  return url.href;
+}
+
 function startTransition(target, delay = 0) {
   if (state.transitioning) return;
   state.transitioning = true;
-  state.transitionTarget = target;
+  state.transitionTarget = targetWithProgress(target);
   state.transitionDelay = delay;
   state.fade = 0;
+}
+
+function preloadDestination(target) {
+  if (!target || window.location.protocol !== "file:") return;
+  const frame = document.createElement("iframe");
+  const url = new URL(target, window.location.href);
+  url.searchParams.delete("fade");
+  url.searchParams.set("preload", "1");
+  frame.src = url.href;
+  frame.title = "Level asset preload";
+  frame.setAttribute("aria-hidden", "true");
+  frame.style.display = "none";
+  const release = (event) => {
+    if (event.source !== frame.contentWindow || event.data?.type !== "webrunner-assets-ready") return;
+    window.removeEventListener("message", release);
+    frame.remove();
+  };
+  window.addEventListener("message", release);
+  document.body.appendChild(frame);
 }
 
 function clamp(value, min, max) {
@@ -540,6 +698,44 @@ function drawTile(gx, gy) {
   sprite.alpha = 0.98;
 }
 
+function projectedSprite(sprite, rect, z, texture) {
+  sprite.visible = true;
+  sprite.texture = texture;
+  sprite.anchor.set(0.5);
+  const center = worldToScreen(rect.x + rect.w / 2, rect.y + rect.h / 2, z);
+  const c = Math.cos(state.yaw);
+  const s = Math.sin(state.yaw);
+  const scaleX = rect.w * state.zoom / texture.width;
+  const scaleY = rect.h * state.zoom / texture.height;
+  sprite.setFromMatrix(new Matrix(c * scaleX, -s * state.projectionY * scaleX, s * scaleY, c * state.projectionY * scaleY, center.x, center.y));
+}
+
+function drawWaterPool(pool, index) {
+  let sprite = waterSprites[index];
+  if (!sprite) {
+    sprite = new Sprite(art.water);
+    waterSprites[index] = sprite;
+    waterLayer.addChild(sprite);
+  }
+  projectedSprite(sprite, pool, 0.5, art.water);
+  sprite.alpha = 0.92;
+  sprite.tint = 0xbad6cf;
+}
+
+function objectSprite(key, texture, foreground = false) {
+  const sprites = foreground ? occlusionSprites : scenerySprites;
+  const layer = foreground ? occlusionSpriteLayer : scenerySpriteLayer;
+  let sprite = sprites.get(key);
+  if (!sprite) {
+    sprite = new Sprite(texture);
+    sprites.set(key, sprite);
+    layer.addChild(sprite);
+  }
+  sprite.visible = true;
+  sprite.texture = texture;
+  return sprite;
+}
+
 function pointInRect(x, y, rect, pad = 0) {
   return x >= rect.x - pad && x <= rect.x + rect.w + pad && y >= rect.y - pad && y <= rect.y + rect.h + pad;
 }
@@ -581,7 +777,6 @@ function drawInfiniteFloor() {
 }
 
 function drawTutorialFloor() {
-  const boundary = level.bounds[0];
   const baseX = Math.floor(state.player.x / tile);
   const baseY = Math.floor(state.player.y / tile);
   for (let gy = baseY - 14; gy <= baseY + 14; gy += 1) {
@@ -589,7 +784,7 @@ function drawTutorialFloor() {
       const centerX = gx * tile + tile / 2;
       const centerY = gy * tile + tile / 2;
       const dist = Math.hypot(centerX - state.player.x, centerY - state.player.y);
-      if (dist <= tile * 13.2 && pointInRect(centerX, centerY, boundary)) drawTile(gx, gy);
+      if (dist <= tile * 13.2) drawTile(gx, gy);
     }
   }
   if (state.tutorial.portalActive) drawPortal();
@@ -633,22 +828,24 @@ function drawDungeonFloor() {
     }
     rectWorld(rect, 0x000000, 0x080605, 0);
   }
-  for (const pool of level.waterPools) {
-    rectWorld(pool, 0x153d43, 0x6b9492, 0.88);
+  level.waterPools.forEach((pool, index) => {
+    drawWaterPool(pool, index);
+    rectWorld(pool, 0x153d43, 0x9ab1a8, 0.08);
     const wave = (performance.now() * 0.025) % 46;
     for (let y = pool.y + 24 - wave; y < pool.y + pool.h; y += 46) {
       const start = worldToScreen(pool.x + 16, y);
       const end = worldToScreen(pool.x + pool.w - 16, y + 10);
       line(start, end, 0x9bc9c2, 2, 0.2);
     }
-    rectWorld({ x: pool.x + 7, y: pool.y + 7, w: pool.w - 14, h: pool.h - 14 }, 0x2b7276, null, 0.12);
-  }
+    rectWorld({ x: pool.x + 7, y: pool.y + 7, w: pool.w - 14, h: pool.h - 14 }, 0x2b7276, null, 0.06);
+  });
   drawWalls();
-  drawStairs();
   drawSceneObjects();
+  drawStairs(elevatedLayer);
+  drawUpperPlatform(elevatedLayer);
 }
 
-function drawWalls() {
+function drawWalls(target = g, foregroundOnly = false) {
   const segments = [
     [-300, 140, -56, 140, 0x241e18], [56, 140, 300, 140, 0x241e18], [300, 140, 300, 600, 0x191510],
     [300, 600, -300, 600, 0x2d261e], [-300, 600, -300, 140, 0x17130f], [-56, 140, -56, -340, 0x17130f],
@@ -657,24 +854,26 @@ function drawWalls() {
     [-380, -920, -380, -340, 0x17130f]
   ];
   for (const [x1, y1, x2, y2, fill] of segments) {
+    if (foregroundOnly && cameraDepth((x1 + x2) / 2, (y1 + y2) / 2) <= 8) continue;
     const midpointY = (y1 + y2) / 2;
     const wallHeight = midpointY <= -340 ? 138 : midpointY < 140 ? 98 : 80;
-    drawWallSegment(x1, y1, x2, y2, fill, wallHeight);
+    drawWallSegment(x1, y1, x2, y2, fill, wallHeight, target);
   }
 }
 
-function drawWallSegment(x1, y1, x2, y2, fill, wallHeight) {
+function drawWallSegment(x1, y1, x2, y2, fill, wallHeight, target = g) {
   const h = wallHeight * state.zoom;
   const a = worldToScreen(x1, y1);
   const b = worldToScreen(x2, y2);
   const face = [{ x: a.x, y: a.y }, { x: b.x, y: b.y }, { x: b.x, y: b.y - h }, { x: a.x, y: a.y - h }];
-  g.poly(face.flatMap((point) => [point.x, point.y])).fill({
+  target.poly(face.flatMap((point) => [point.x, point.y])).fill({ color: fill, alpha: 1 });
+  target.poly(face.flatMap((point) => [point.x, point.y])).fill({
     texture: art.wall,
     color: 0xd2c4ae,
     matrix: new Matrix().scale(0.13),
     alpha: 1
   }).stroke({ color: 0x050403, width: 3 });
-  g.poly(face.flatMap((point) => [point.x, point.y])).fill({ color: fill, alpha: 0.1 });
+  target.poly(face.flatMap((point) => [point.x, point.y])).fill({ color: fill, alpha: 0.12 });
   const dx = b.x - a.x;
   const dy = b.y - a.y;
   const length = Math.hypot(dx, dy) || 1;
@@ -683,8 +882,7 @@ function drawWallSegment(x1, y1, x2, y2, fill, wallHeight) {
   poly([
     { x: a.x, y: a.y - h }, { x: b.x, y: b.y - h },
     { x: b.x + lipX, y: b.y - h + lipY }, { x: a.x + lipX, y: a.y - h + lipY }
-  ], 0x625541, 0x100d0a, 2, 0.72);
-  line({ x: a.x, y: a.y - h + 2 }, { x: b.x, y: b.y - h + 2 }, 0xb09a70, 1, 0.38);
+  ], 0x4b443b, 0x100d0a, 2, 1, target);
   const fadeHeight = Math.max(4, h * 0.05);
   const fadeSteps = 5;
   for (let i = 0; i < fadeSteps; i += 1) {
@@ -695,7 +893,7 @@ function drawWallSegment(x1, y1, x2, y2, fill, wallHeight) {
       { x: b.x, y: b.y - h + fadeHeight * lower },
       { x: b.x, y: b.y - h + fadeHeight * upper },
       { x: a.x, y: a.y - h + fadeHeight * upper }
-    ], 0x8a8883, null, 1, 0.72 - i * 0.11);
+    ], 0x77746f, null, 1, 0.36 - i * 0.065, target);
   }
 }
 
@@ -708,46 +906,52 @@ function texturedFace(points, texture, tint = 0xffffff, alpha = 1, scale = 0.13,
   }).stroke({ color: 0x080706, width: 2 });
 }
 
-function drawUpperPlatform() {
+function drawPlatformPrism(rect, z, target = g) {
+  const corners = [
+    { x: rect.x, y: rect.y },
+    { x: rect.x + rect.w, y: rect.y },
+    { x: rect.x + rect.w, y: rect.y + rect.h },
+    { x: rect.x, y: rect.y + rect.h }
+  ];
+  const top = corners.map((corner) => worldToScreen(corner.x, corner.y, z));
+  const centerDepth = cameraDepth(rect.x + rect.w / 2, rect.y + rect.h / 2);
+  const visibleSides = corners.map((corner, index) => {
+    const nextIndex = (index + 1) % corners.length;
+    const next = corners[nextIndex];
+    return {
+      index,
+      nextIndex,
+      depth: cameraDepth((corner.x + next.x) / 2, (corner.y + next.y) / 2)
+    };
+  }).filter((side) => side.depth >= centerDepth)
+    .sort((a, b) => a.depth - b.depth);
+
+  for (const side of visibleSides) {
+    const a = corners[side.index];
+    const b = corners[side.nextIndex];
+    const face = [
+      top[side.index],
+      top[side.nextIndex],
+      worldToScreen(b.x, b.y, z - 38),
+      worldToScreen(a.x, a.y, z - 38)
+    ];
+    poly(face, side.index % 2 ? 0x4b4338 : 0x373129, 0x080706, 2, 1, target);
+    texturedFace(face, art.wall, side.index % 2 ? 0xb5a287 : 0x95856f, 1, 0.1, target);
+  }
+  poly(top, 0x4c4942, 0x080706, 2, 1, target);
+  texturedFace(top, art.floor, 0xf0dfc3, 1, 0.11, target);
+  for (let x = rect.x + 80; x < rect.x + rect.w; x += 92) {
+    line(worldToScreen(x, rect.y + 6, z + 0.5), worldToScreen(x, rect.y + rect.h - 6, z + 0.5), 0x17130f, 1.5, 0.52, target);
+  }
+  for (const side of visibleSides) line(top[side.index], top[side.nextIndex], 0xe2c88f, 3, 0.82, target);
+  return top;
+}
+
+function drawUpperPlatform(target = g) {
   const rect = level.upperPlatform;
   const z = level.platformHeight;
-  const groundShadow = [
-    worldToScreen(rect.x + 8, rect.y + 12),
-    worldToScreen(rect.x + rect.w + 20, rect.y + 12),
-    worldToScreen(rect.x + rect.w + 20, rect.y + rect.h + 28),
-    worldToScreen(rect.x + 8, rect.y + rect.h + 28)
-  ];
-  poly(groundShadow, 0x000000, null, 1, 0.58);
-  const top = [
-    worldToScreen(rect.x, rect.y, z),
-    worldToScreen(rect.x + rect.w, rect.y, z),
-    worldToScreen(rect.x + rect.w, rect.y + rect.h, z),
-    worldToScreen(rect.x, rect.y + rect.h, z)
-  ];
-  const frontTopLeft = top[3];
-  const frontTopRight = top[2];
-  const frontBottomRight = worldToScreen(rect.x + rect.w, rect.y + rect.h, z - 38);
-  const frontBottomLeft = worldToScreen(rect.x, rect.y + rect.h, z - 38);
-  texturedFace([frontTopLeft, frontTopRight, frontBottomRight, frontBottomLeft], art.wall, 0xc0ad91, 1, 0.1);
-  const leftBottomBack = worldToScreen(rect.x, rect.y, z - 38);
-  texturedFace([top[0], top[3], frontBottomLeft, leftBottomBack], art.wall, 0x95856f, 1, 0.1);
-  poly(top, 0x514b42, 0x080706, 2, 1);
-  texturedFace(top, art.floor, 0xf0dfc3, 1, 0.11);
-  line(top[3], top[2], 0xe2c88f, 4, 0.9);
-  for (let x = rect.x + 80; x < rect.x + rect.w; x += 92) {
-    line(worldToScreen(x, rect.y + 6, z + 0.5), worldToScreen(x, rect.y + rect.h - 6, z + 0.5), 0x17130f, 1.5, 0.52);
-  }
-
-  for (let x = rect.x + 48; x < rect.x + rect.w - 30; x += 118) {
-    const braceTop = worldToScreen(x, rect.y + rect.h, z - 38);
-    const braceBottom = worldToScreen(x + 18, rect.y + rect.h + 30, z - 82);
-    poly([
-      { x: braceTop.x - 6, y: braceTop.y }, { x: braceTop.x + 6, y: braceTop.y },
-      { x: braceBottom.x + 5, y: braceBottom.y }, { x: braceBottom.x - 5, y: braceBottom.y }
-    ], 0x332b22, 0x090706, 1.5, 0.95);
-  }
-
-  drawElevatedExit();
+  drawPlatformPrism(rect, z, target);
+  drawElevatedExit(target);
 }
 
 function drawElevatedExit(target = g) {
@@ -784,7 +988,7 @@ function drawStairs(target = g, foregroundOnly = false) {
   const depth = 42;
   const stride = 37;
   const startY = -430;
-  for (let i = steps - 1; i >= 0; i -= 1) {
+  for (let i = 0; i < steps; i += 1) {
     const z = level.platformHeight * (i + 1) / steps;
     const previousZ = level.platformHeight * i / steps;
     const rect = { x: -370, y: startY - i * stride, w: width, h: depth };
@@ -798,9 +1002,9 @@ function drawStairs(target = g, foregroundOnly = false) {
       worldToScreen(rect.x + rect.w, rect.y + rect.h, previousZ),
       worldToScreen(rect.x, rect.y + rect.h, previousZ)
     ];
-    poly(riser, 0x3a332a, 0x080706, 2, 1, target);
-    texturedFace(riser, art.wall, 0xb09c7f, 0.8, 0.09, target);
-    poly(top, 0x575047, 0x080706, 2, 1, target);
+    poly(riser, 0x40382f, 0x080706, 2, 1, target);
+    texturedFace(riser, art.wall, 0xb09c7f, 1, 0.09, target);
+    poly(top, 0x504c45, 0x080706, 2, 1, target);
     texturedFace(top, art.floor, 0xe0d1b7, 1, 0.1, target);
     line(top[3], top[2], 0xe0c88e, 2.2, 0.8, target);
   }
@@ -810,31 +1014,15 @@ function drawUpperPlatformOccluder() {
   const rect = level.upperPlatform;
   const playerOnPlatform = state.player.floorZ >= level.platformHeight - 8 && pointInRect(state.player.x, state.player.y, rect, 8);
   if (playerOnPlatform || cameraDepth(rect.x + rect.w / 2, rect.y + rect.h / 2) <= 10) return;
-  const z = level.platformHeight;
-  const top = [
-    worldToScreen(rect.x, rect.y, z),
-    worldToScreen(rect.x + rect.w, rect.y, z),
-    worldToScreen(rect.x + rect.w, rect.y + rect.h, z),
-    worldToScreen(rect.x, rect.y + rect.h, z)
-  ];
-  const front = [
-    top[3], top[2],
-    worldToScreen(rect.x + rect.w, rect.y + rect.h, z - 38),
-    worldToScreen(rect.x, rect.y + rect.h, z - 38)
-  ];
-  poly(front, 0x3a332a, 0x080706, 2, 1, occlusionLayer);
-  texturedFace(front, art.wall, 0xc0ad91, 1, 0.1, occlusionLayer);
-  poly(top, 0x514b42, 0x080706, 2, 1, occlusionLayer);
-  texturedFace(top, art.floor, 0xf0dfc3, 1, 0.11, occlusionLayer);
-  line(top[3], top[2], 0xe2c88f, 4, 0.9, occlusionLayer);
+  drawPlatformPrism(rect, level.platformHeight, occlusionLayer);
 }
 
 function drawForegroundOccluders() {
   if (level.kind !== "dungeon") return;
   const playerOnPlatform = state.player.floorZ >= level.platformHeight - 8 && pointInRect(state.player.x, state.player.y, level.upperPlatform, 8);
+  drawStairs(occlusionLayer, true);
   drawUpperPlatformOccluder();
   if (cameraDepth(level.exit.x + level.exit.w / 2, level.exit.y + level.exit.h / 2) > 8) drawElevatedExit(occlusionLayer);
-  drawStairs(occlusionLayer, true);
   const columns = level.columns
     .filter(() => !playerOnPlatform)
     .filter((column) => cameraDepth(column.x, column.y) > 8)
@@ -847,6 +1035,7 @@ function drawForegroundOccluders() {
   for (const potion of level.potions) {
     if (!potion.collected && cameraDepth(potion.x, potion.y) > 8) drawPotion(potion, occlusionLayer);
   }
+  drawWalls(occlusionLayer, true);
 }
 
 function objectScreenY(object) {
@@ -855,14 +1044,12 @@ function objectScreenY(object) {
 
 function drawSceneObjects() {
   const objects = [
-    { x: level.upperPlatform.x + level.upperPlatform.w / 2, y: level.upperPlatform.y + level.upperPlatform.h, kind: "upperPlatform" },
     ...level.columns.map((o) => ({ ...o, kind: "column" })),
     ...level.torches.map((o) => ({ ...o, kind: "torch" })),
     ...level.coins.filter((o) => !o.collected).map((o) => ({ ...o, kind: "coin" })),
     ...level.potions.filter((o) => !o.collected).map((o) => ({ ...o, kind: "potion" }))
   ].sort((a, b) => objectScreenY(a) - objectScreenY(b));
   for (const object of objects) {
-    if (object.kind === "upperPlatform") drawUpperPlatform();
     if (object.kind === "column") drawColumn(object);
     if (object.kind === "torch") drawTorch(object);
     if (object.kind === "coin") drawCoin(object);
@@ -872,22 +1059,15 @@ function drawSceneObjects() {
 
 function drawColumn(column, target = g) {
   const p = worldToScreen(column.x, column.y);
-  const z = 70 * state.zoom;
   const s = state.zoom;
-  target.ellipse(p.x + 9 * s, p.y + 8 * s, 28 * s, 11 * s).fill({ color: 0x000000, alpha: 0.44 });
-  poly([
-    { x: p.x - 13 * s, y: p.y - 9 * s }, { x: p.x + 13 * s, y: p.y - 9 * s },
-    { x: p.x + 9 * s, y: p.y - z + 7 * s }, { x: p.x - 9 * s, y: p.y - z + 7 * s }
-  ], 0x3d382f, 0x0a0806, 2, 1, target);
-  poly([
-    { x: p.x - 9 * s, y: p.y - z + 7 * s }, { x: p.x + 9 * s, y: p.y - z + 7 * s },
-    { x: p.x + 5 * s, y: p.y - z + 13 * s }, { x: p.x - 5 * s, y: p.y - z + 13 * s }
-  ], 0x71634d, null, 1, 0.5, target);
-  centeredRect(p.x, p.y - z - 2 * s, 42 * s, 11 * s, 0x332d25, 0x090706, target);
-  centeredRect(p.x, p.y - z - 10 * s, 32 * s, 8 * s, 0x51483a, 0x090706, target);
-  centeredRect(p.x, p.y - 2 * s, 42 * s, 12 * s, 0x2b261f, 0x090706, target);
-  centeredRect(p.x, p.y - 10 * s, 32 * s, 8 * s, 0x574b3a, 0x090706, target);
-  line({ x: p.x - 3 * s, y: p.y - 20 * s }, { x: p.x + 1 * s, y: p.y - 42 * s }, 0x17130f, 2, 0.7, target);
+  target.ellipse(p.x + 9 * s, p.y + 7 * s, 34 * s, 12 * s).fill({ color: 0x000000, alpha: 0.48 });
+  const foreground = target === occlusionLayer;
+  const sprite = objectSprite(`column:${column.x}:${column.y}`, art.column, foreground);
+  sprite.anchor.set(0.5, 0.94);
+  const scale = 112 * s / art.column.height;
+  sprite.scale.set(scale);
+  sprite.position.set(p.x, p.y + 5 * s);
+  sprite.tint = 0xf2e7d0;
 }
 
 function drawCoin(coin, target = g) {
@@ -895,9 +1075,15 @@ function drawCoin(coin, target = g) {
   const bob = Math.sin(performance.now() * 0.004 + coin.x) * 3 * state.zoom;
   const y = p.y - 8 * state.zoom + bob;
   target.ellipse(p.x + 3, p.y + 3, 10 * state.zoom, 4 * state.zoom).fill({ color: 0x000000, alpha: 0.38 });
-  target.ellipse(p.x, y, 8 * state.zoom, 11 * state.zoom).fill(0xd9a936).stroke({ color: 0x51300d, width: 2 });
-  target.ellipse(p.x, y, 4.5 * state.zoom, 7 * state.zoom).stroke({ color: 0xffe29a, width: 1.5, alpha: 0.7 });
-  line({ x: p.x - 2, y: y - 7 }, { x: p.x + 2, y: y + 4 }, 0xfff1bd, 1.5, 0.8, target);
+  const frame = Math.floor(performance.now() / 115 + hash(coin.x, coin.y, 31) * art.coin.length) % art.coin.length;
+  const texture = art.coin[frame];
+  const foreground = target === occlusionLayer;
+  const sprite = objectSprite(`coin:${coin.x}:${coin.y}`, texture, foreground);
+  sprite.anchor.set(0.5);
+  const scale = 29 * state.zoom / texture.height;
+  sprite.scale.set(scale);
+  sprite.position.set(p.x, y);
+  sprite.tint = 0xffefbd;
 }
 
 function drawPotion(potion, target = g) {
@@ -915,24 +1101,29 @@ function drawPotion(potion, target = g) {
 }
 
 function drawTorch(torch) {
-  const p = worldToScreen(torch.x, torch.y);
+  const roomWallHeight = torch.y <= -340 ? 138 : torch.y < 140 ? 98 : 80;
+  const flameHeight = 54;
+  const mountZ = Math.max(8, roomWallHeight * 0.95 - flameHeight);
+  const p = worldToScreen(torch.x, torch.y, mountZ);
   const s = state.zoom;
-  const flicker = Math.sin(performance.now() * 0.018 + torch.x * 0.04) * 3 * s;
+  const flicker = Math.sin(performance.now() * 0.018 + torch.x * 0.04) * 3;
+  const flameShoulder = 33;
+  const innerTop = 47 + flicker * 0.5;
   line({ x: p.x - 8 * s, y: p.y }, { x: p.x + 7 * s, y: p.y - 13 * s }, 0x17100a, 6 * s, 1);
   centeredRect(p.x + 5 * s, p.y - 17 * s, 8 * s, 24 * s, 0x3f2816, 0x100906);
   line({ x: p.x + 1 * s, y: p.y - 22 * s }, { x: p.x + 9 * s, y: p.y - 11 * s }, 0x9d7041, 2, 0.7);
-  g.circle(p.x + 5 * s, p.y - 33 * s, (50 + flicker) * s).fill({ color: 0xd85c22, alpha: 0.15 });
+  g.circle(p.x + 5 * s, p.y - flameShoulder * s, (48 + flicker) * s).fill({ color: 0xd85c22, alpha: 0.15 });
   poly([
-    { x: p.x + 5 * s, y: p.y - (54 + flicker) * s },
-    { x: p.x + 15 * s, y: p.y - 33 * s },
+    { x: p.x + 5 * s, y: p.y - flameHeight * s },
+    { x: p.x + 15 * s, y: p.y - flameShoulder * s },
     { x: p.x + 5 * s, y: p.y - 20 * s },
-    { x: p.x - 5 * s, y: p.y - 33 * s }
+    { x: p.x - 5 * s, y: p.y - flameShoulder * s }
   ], 0xe56b24, 0x5a1f0c, 1.5);
   poly([
-    { x: p.x + 5 * s, y: p.y - (47 + flicker * 0.5) * s },
-    { x: p.x + 11 * s, y: p.y - 33 * s },
+    { x: p.x + 5 * s, y: p.y - innerTop * s },
+    { x: p.x + 11 * s, y: p.y - flameShoulder * s },
     { x: p.x + 5 * s, y: p.y - 25 * s },
-    { x: p.x, y: p.y - 34 * s }
+    { x: p.x, y: p.y - flameShoulder * s }
   ], 0xffd56b, null, 1);
 }
 
@@ -1057,12 +1248,24 @@ function actorDirectionRow() {
   return directionRowForHeading(state.player.heading);
 }
 
+function movementInputDirectionRow() {
+  let x = 0;
+  let y = 0;
+  if (state.keys.has("ArrowUp") || state.keys.has("KeyW")) y -= 1;
+  if (state.keys.has("ArrowDown") || state.keys.has("KeyS")) y += 1;
+  if (state.keys.has("ArrowLeft") || state.keys.has("KeyA")) x -= 1;
+  if (state.keys.has("ArrowRight") || state.keys.has("KeyD")) x += 1;
+  if (x === 0 && y === 0) return null;
+  const angle = Math.atan2(y * state.projectionY, x);
+  return ((Math.round((angle - Math.PI / 2) / (Math.PI / 4)) % 8) + 8) % 8;
+}
+
 function drawCharacter() {
   const player = state.player;
   actorLayer.visible = !state.tutorial?.portalHidden;
   if (!actorLayer.visible) return;
   const moving = isMoving();
-  const row = actorDirectionRow();
+  let row = actorDirectionRow();
   let column = 0;
   let sheet = art.action;
   const throwProgress = player.bombThrowTime > 0 ? 1 - player.bombThrowTime / bombThrowDuration : 0;
@@ -1075,6 +1278,10 @@ function drawCharacter() {
   } else if (player.holdingBomb && player.attackTime > 0) {
     sheet = art.bombCombat;
     column = 2;
+  } else if (player.holdingBomb && moving) {
+    sheet = art.bombWalk;
+    row = movementInputDirectionRow() ?? row;
+    column = Math.floor(player.stride / (Math.PI / 3)) % 6;
   } else if (player.holdingBomb) {
     sheet = art.bomb;
     column = 0;
@@ -1124,7 +1331,7 @@ function drawCharacter() {
   }
   actorSprite.position.set(baseX + poseX, baseY + poseY - player.z - (rolling ? targetHeight * state.zoom * 0.4 : 0));
   actorSprite.scale.set(scale);
-  actorSprite.rotation = rolling ? (1 - player.rollTime / 0.55) * Math.PI * 2 : poseRotation;
+  actorSprite.rotation = rolling ? (1 - player.rollTime / 0.55) * Math.PI * 2 * player.rollDirection : poseRotation;
   actorSprite.alpha = 1;
 
   if (player.stealth && sheet !== art.runStealth && player.rollTime <= 0) {
@@ -1185,20 +1392,24 @@ function drawEnemies() {
   for (const enemy of state.enemies) {
     if (!enemy.visual) createEnemyVisual(enemy);
     const { container, shadow, sprite, healthBar } = enemy.visual;
-    container.visible = enemy.alive;
-    if (!enemy.alive) continue;
+    container.visible = !enemy.removed;
+    if (enemy.removed) continue;
     const base = worldToScreen(enemy.x, enemy.y, groundElevation(enemy.x, enemy.y));
     const row = directionRowForHeading(enemy.heading);
-    const column = slimeAnimationColumn(enemy);
+    const dying = !enemy.alive;
+    const column = dying
+      ? Math.min(3, Math.floor(enemy.deathAge / enemy.deathDuration * 4))
+      : slimeAnimationColumn(enemy);
     shadow.clear();
     healthBar.clear();
     shadow.ellipse(base.x + 3 * state.zoom, base.y + 3 * state.zoom, 34 * state.zoom, 12 * state.zoom)
       .fill({ color: 0x000000, alpha: 0.48 });
-    sprite.texture = art.slime[row][column];
-    const scale = 78 / sprite.texture.height * state.zoom;
+    sprite.texture = dying ? art.slimeDeath[row][column] : art.slime[row][column];
+    const scale = (dying ? 82 : 78) / sprite.texture.height * state.zoom;
     sprite.scale.set(scale);
     sprite.position.set(base.x, base.y - enemy.z * state.zoom);
-    if (enemy.health < enemy.maxHealth) {
+    sprite.alpha = dying ? clamp(enemy.deathTime / 0.22, 0, 1) : 1;
+    if (!dying && enemy.health < enemy.maxHealth) {
       const width = 48 * state.zoom;
       const y = sprite.y - 70 * state.zoom;
       healthBar.roundRect(base.x - width / 2, y, width, 6 * state.zoom, 2 * state.zoom)
@@ -1220,18 +1431,51 @@ function isMoving() {
     state.keys.has("KeyW") || state.keys.has("KeyA") || state.keys.has("KeyS") || state.keys.has("KeyD");
 }
 
+function walkableRegionIndex(x, y) {
+  return level.bounds.findIndex((rect) => pointInRect(x, y, rect, 2));
+}
+
+function slimeNavigationGoal(enemy) {
+  const enemyRegion = walkableRegionIndex(enemy.x, enemy.y);
+  const playerRegion = walkableRegionIndex(state.player.x, state.player.y);
+  if (state.player.floorZ > 20 && groundElevation(enemy.x, enemy.y) < 20) return { x: -320, y: -410 };
+  if (enemyRegion === playerRegion || enemyRegion < 0 || playerRegion < 0) return state.player;
+  if (enemyRegion === 2) return { x: 0, y: -330 };
+  if (enemyRegion === 1 && playerRegion === 0) return { x: 0, y: 150 };
+  if (enemyRegion === 1 && playerRegion === 2) return { x: 0, y: -330 };
+  return { x: 0, y: 130 };
+}
+
+function slimePathClear(enemy, targetX, targetY) {
+  let previousElevation = groundElevation(enemy.x, enemy.y);
+  for (let step = 1; step <= 8; step += 1) {
+    const t = step / 8;
+    const x = enemy.x + (targetX - enemy.x) * t;
+    const y = enemy.y + (targetY - enemy.y) * t;
+    const elevation = groundElevation(x, y);
+    if (!pointInWalkable(x, y, 22) || Math.abs(elevation - previousElevation) > 36) return false;
+    if (level.columns.some((column) => Math.hypot(x - column.x, y - column.y) < 43)) return false;
+    previousElevation = elevation;
+  }
+  return true;
+}
+
 function chooseSlimeLanding(enemy) {
   enemy.originX = enemy.x;
   enemy.originY = enemy.y;
-  const dx = state.player.x - enemy.x;
-  const dy = state.player.y - enemy.y;
+  const goal = slimeNavigationGoal(enemy);
+  const dx = goal.x - enemy.x;
+  const dy = goal.y - enemy.y;
   const distance = Math.hypot(dx, dy) || 1;
   const travel = Math.min(108, distance);
   const variation = (hash(Math.round(enemy.x), Math.round(enemy.y), Math.floor(performance.now() / 1000)) - 0.5) * 34;
-  const candidateX = enemy.x + dx / distance * travel - dy / distance * variation;
-  const candidateY = enemy.y + dy / distance * travel + dx / distance * variation;
-  const chamber = level.bounds[2];
-  if (pointInWalkable(candidateX, candidateY, 22) && pointInRect(candidateX, candidateY, chamber, -22) && groundElevation(candidateX, candidateY) < 8) {
+  let candidateX = enemy.x + dx / distance * travel - dy / distance * variation;
+  let candidateY = enemy.y + dy / distance * travel + dx / distance * variation;
+  if (!slimePathClear(enemy, candidateX, candidateY)) {
+    candidateX = enemy.x + dx / distance * travel * 0.72;
+    candidateY = enemy.y + dy / distance * travel * 0.72;
+  }
+  if (slimePathClear(enemy, candidateX, candidateY)) {
     enemy.targetX = candidateX;
     enemy.targetY = candidateY;
     enemy.heading = Math.atan2(candidateY - enemy.y, candidateX - enemy.x);
@@ -1242,12 +1486,29 @@ function chooseSlimeLanding(enemy) {
   }
 }
 
+function defeatEnemy(enemy) {
+  if (!enemy.alive) return false;
+  enemy.alive = false;
+  enemy.deathAge = 0;
+  enemy.deathDuration = 1.2;
+  enemy.deathTime = enemy.deathDuration;
+  enemy.z = 0;
+  return true;
+}
+
 function updateEnemies(delta) {
   const player = state.player;
   player.contactDamageCooldown = Math.max(0, player.contactDamageCooldown - delta);
   player.hitFlash = Math.max(0, player.hitFlash - delta);
   for (const enemy of state.enemies) {
-    if (!enemy.alive) continue;
+    if (!enemy.alive) {
+      if (!enemy.removed) {
+        enemy.deathAge += delta;
+        enemy.deathTime = Math.max(0, enemy.deathTime - delta);
+        if (enemy.deathTime === 0) enemy.removed = true;
+      }
+      continue;
+    }
     enemy.jumpClock += delta;
     if (enemy.jumpClock >= enemy.cycleDuration) {
       enemy.jumpClock %= enemy.cycleDuration;
@@ -1270,7 +1531,7 @@ function updateEnemies(delta) {
     const sameHeight = Math.abs((groundElevation(enemy.x, enemy.y) + enemy.z) - (player.floorZ + player.z)) < 30;
     if (sameHeight && Math.hypot(player.x - enemy.x, player.y - enemy.y) < 34 && player.contactDamageCooldown <= 0) {
       player.health = Math.max(0, player.health - enemy.contactDamage);
-      player.contactDamageCooldown = 2;
+      player.contactDamageCooldown = 1;
       player.hitFlash = 0.24;
       refreshInventory();
       setStatus(`${enemy.name} dealt ${enemy.contactDamage} damage`);
@@ -1292,18 +1553,19 @@ function blastPathClear(explosion, enemy) {
 }
 
 function explodeBomb(projectile) {
-  const explosion = { x: projectile.x, y: projectile.y, z: Math.max(projectile.z, groundElevation(projectile.x, projectile.y)), age: 0, duration: 0.52 };
+  const explosion = { x: projectile.x, y: projectile.y, z: Math.max(projectile.z, groundElevation(projectile.x, projectile.y)), age: 0, duration: 0.82 };
   state.explosions.push(explosion);
+  state.scorches.push({ ...explosion, age: 0, duration: 4.5 });
+  let defeated = 0;
   for (const enemy of state.enemies) {
     if (!enemy.alive) continue;
     const enemyZ = groundElevation(enemy.x, enemy.y) + enemy.z + 18;
     const distance = Math.hypot(enemy.x - explosion.x, enemy.y - explosion.y, enemyZ - explosion.z);
     if (distance <= meter && blastPathClear(explosion, enemy)) {
       enemy.health = Math.max(0, enemy.health - 50);
-      enemy.alive = enemy.health > 0;
+      if (enemy.health === 0 && defeatEnemy(enemy)) defeated += 1;
     }
   }
-  const defeated = state.enemies.filter((enemy) => !enemy.alive).length;
   setStatus(defeated ? `Bomb impact - ${defeated} slime${defeated === 1 ? "" : "s"} defeated` : "Bomb impact");
 }
 
@@ -1343,10 +1605,19 @@ function updateBombs(delta) {
   state.projectiles = state.projectiles.filter((projectile) => !projectile.exploded);
   for (const explosion of state.explosions) explosion.age += delta;
   state.explosions = state.explosions.filter((explosion) => explosion.age < explosion.duration);
+  for (const scorch of state.scorches) scorch.age += delta;
+  state.scorches = state.scorches.filter((scorch) => scorch.age < scorch.duration);
 }
 
 function drawBombEffects() {
   effectsLayer.clear();
+  for (const scorch of state.scorches) {
+    const p = worldToScreen(scorch.x, scorch.y, scorch.z + 1);
+    const fade = clamp((scorch.duration - scorch.age) / 1.2, 0, 1);
+    effectsLayer.ellipse(p.x, p.y, 34 * state.zoom, 15 * state.zoom)
+      .fill({ color: 0x090604, alpha: 0.5 * fade })
+      .stroke({ color: 0x4e2415, width: 2 * state.zoom, alpha: 0.42 * fade });
+  }
   for (const projectile of state.projectiles) {
     if (!projectile.released) continue;
     const p = worldToScreen(projectile.x, projectile.y, projectile.z);
@@ -1359,7 +1630,7 @@ function drawBombEffects() {
   for (const explosion of state.explosions) {
     const progress = explosion.age / explosion.duration;
     const p = worldToScreen(explosion.x, explosion.y, explosion.z);
-    const radius = meter * state.zoom * Math.sin(progress * Math.PI);
+    const radius = meter * 1.12 * state.zoom * Math.sin(progress * Math.PI);
     effectsLayer.ellipse(p.x, p.y, radius, radius * state.projectionY)
       .fill({ color: 0xf06a24, alpha: 0.28 * (1 - progress) })
       .stroke({ color: 0xffcf6a, width: 4 * state.zoom, alpha: 0.8 * (1 - progress) });
@@ -1422,10 +1693,15 @@ function update(delta) {
     const stanceSpeed = player.stance === "crawl" ? 0.28 : player.stance === "crouch" ? 0.45 : 1;
     const speed = player.speed * (sprinting && player.stance === "stand" ? 1.75 : 1) * stanceSpeed;
     const distance = movePlayer(worldMove.x * speed * delta, worldMove.y * speed * delta);
-    if (tutorial && tutorial.step === 1 && sprinting && !tutorial.advancing) {
+    if (tutorial && tutorial.step === tutorialStep.sprint && sprinting && !tutorial.advancing) {
       tutorial.sprintDistance += distance;
       refreshTutorialHud();
-      if (tutorial.sprintDistance >= 3 * meter) completeTutorialStep(1);
+      if (tutorial.sprintDistance >= 3 * meter) completeTutorialStep(tutorialStep.sprint);
+    }
+    if (tutorial && tutorial.step === tutorialStep.lowMovement && !tutorial.advancing && ["crouch", "crawl"].includes(player.stance)) {
+      tutorial.lowMovement.add(player.stance);
+      refreshTutorialHud();
+      if (tutorial.lowMovement.size === 2) completeTutorialStep(tutorialStep.lowMovement);
     }
     player.heading = Math.atan2(worldMove.y, worldMove.x);
     player.stride += delta * (sprinting ? 12 : 15);
@@ -1454,9 +1730,13 @@ function update(delta) {
       player.jumpAge = 0;
       player.grounded = true;
       player.landTime = 0.18;
-      if (tutorial?.jumpStarted && tutorial.step === 2) {
+      if (tutorial?.jumpStarted && tutorial.step === tutorialStep.jump) {
         tutorial.jumpStarted = false;
-        completeTutorialStep(2);
+        completeTutorialStep(tutorialStep.jump);
+      }
+      if (tutorial?.crouchJumpStarted && tutorial.step === tutorialStep.crouchJump) {
+        tutorial.crouchJumpStarted = false;
+        completeTutorialStep(tutorialStep.crouchJump);
       }
     }
   }
@@ -1538,9 +1818,13 @@ function collectItems() {
 
 function render() {
   g.clear();
+  elevatedLayer.clear();
   overlay.clear();
   occlusionLayer.clear();
   floorSpriteCount = 0;
+  for (const sprite of waterSprites) sprite.visible = false;
+  for (const sprite of scenerySprites.values()) sprite.visible = false;
+  for (const sprite of occlusionSprites.values()) sprite.visible = false;
   if (level.kind === "infinite") drawInfiniteFloor();
   else if (level.kind === "tutorial") drawTutorialFloor();
   else drawDungeonFloor();
@@ -1557,7 +1841,7 @@ function render() {
 }
 
 function chooseItem(slot) {
-  if (isTutorial && state.tutorial.step === 5 && slot !== 4) {
+  if (isTutorial && state.tutorial.step === tutorialStep.selectItem && slot !== 4) {
     setStatus("Select bomb with 4");
     return;
   }
@@ -1566,7 +1850,7 @@ function chooseItem(slot) {
     if (state.inventory.bombs > 0) {
       state.player.holdingBomb = true;
       setStatus("Bomb ready");
-      if (isTutorial && state.tutorial.step === 5) completeTutorialStep(5);
+      if (isTutorial && state.tutorial.step === tutorialStep.selectItem) completeTutorialStep(tutorialStep.selectItem);
     } else setStatus("No bombs");
     return;
   }
@@ -1597,12 +1881,12 @@ function useWeapon() {
     .sort((a, b) => a.distance - b.distance)[0]?.enemy;
   if (target) {
     target.health = Math.max(0, target.health - 25);
-    target.alive = target.health > 0;
+    if (target.health === 0) defeatEnemy(target);
     setStatus(target.alive ? `${target.name}: ${target.health} health` : `${target.name} defeated`);
   } else {
     setStatus(state.player.holdingBomb ? "Sword with bomb" : "Sword strike");
   }
-  if (isTutorial && state.tutorial.step === 3) completeTutorialStep(3);
+  if (isTutorial && state.tutorial.step === tutorialStep.attack) completeTutorialStep(tutorialStep.attack);
 }
 
 function specialAction() {
@@ -1625,7 +1909,7 @@ function specialAction() {
     });
     refreshInventory();
     setStatus("Bomb thrown");
-    if (isTutorial && state.tutorial.step === 6) completeTutorialStep(6);
+    if (isTutorial && state.tutorial.step === tutorialStep.special) completeTutorialStep(tutorialStep.special);
   } else {
     state.player.specialTime = 0.35;
     setStatus("Special action");
@@ -1652,6 +1936,11 @@ window.addEventListener("resize", () => {
 });
 
 window.addEventListener("keydown", (event) => {
+  if (isTutorial && hud.skipConfirm && !hud.skipConfirm.classList.contains("hidden")) {
+    event.preventDefault();
+    if (event.code === "Escape") hud.skipConfirm.classList.add("hidden");
+    return;
+  }
   if (!hud.itemMenu.classList.contains("hidden") && ["Digit1", "Digit2", "Digit3", "Digit4"].includes(event.code)) {
     event.preventDefault();
     if (!tutorialActionUnlocked("selectItem")) {
@@ -1675,15 +1964,27 @@ window.addEventListener("keydown", (event) => {
       return;
     }
     if (player.stance === "crouch" && moving) {
-      player.rollTime = 0.55;
-      player.rollX = player.lastMoveX;
-      player.rollY = player.lastMoveY;
-      player.stance = "stand";
-      player.grounded = false;
-      player.vz = 360;
-      player.jumpAge = 0;
-      player.jumpArm = 0;
-      setStatus("Jump roll");
+      const lateralJump = Math.abs(player.lastMoveX) >= Math.abs(player.lastMoveY);
+      if (lateralJump) {
+        player.rollTime = 0.55;
+        player.rollX = player.lastMoveX;
+        player.rollY = player.lastMoveY;
+        player.rollDirection = player.lastMoveX < 0 ? -1 : 1;
+        player.stance = "stand";
+        player.grounded = false;
+        player.vz = 360;
+        player.jumpAge = 0;
+        player.jumpArm = 0;
+        setStatus("Jump roll");
+      } else {
+        player.stance = "stand";
+        player.grounded = false;
+        player.vz = 426;
+        player.jumpAge = 0;
+        player.jumpArm = 1;
+        if (isTutorial && state.tutorial.step === tutorialStep.crouchJump) state.tutorial.crouchJumpStarted = true;
+        setStatus("Crouch jump");
+      }
       return;
     }
     if (!event.repeat && player.grounded) {
@@ -1691,17 +1992,22 @@ window.addEventListener("keydown", (event) => {
       player.vz = player.stance === "crouch" ? 426 : 520;
       player.jumpAge = 0;
       player.jumpArm = 1;
-      if (isTutorial && state.tutorial.step === 2) state.tutorial.jumpStarted = true;
+      if (isTutorial && state.tutorial.step === tutorialStep.jump) state.tutorial.jumpStarted = true;
     }
     return;
   }
   if (event.code === "ControlLeft") {
     event.preventDefault();
-    if (isTutorial && !state.tutorial.portalActive) {
-      setStatus("Complete training first");
+    if (!tutorialActionUnlocked("stance")) {
+      setStatus("Complete the current lesson");
       return;
     }
     toggleCrouch(isMoving());
+    if (isTutorial && state.tutorial.step === tutorialStep.stances && ["crouch", "crawl"].includes(state.player.stance)) {
+      state.tutorial.stanceActions.add(state.player.stance);
+      refreshTutorialHud();
+      if (state.tutorial.stanceActions.size === 2) completeTutorialStep(tutorialStep.stances);
+    }
     return;
   }
   if (event.code === "KeyQ" && !event.repeat) {
@@ -1722,7 +2028,7 @@ window.addEventListener("keydown", (event) => {
     }
     hud.itemMenu.classList.toggle("hidden");
     setStatus(hud.itemMenu.classList.contains("hidden") ? "World mode" : "Choose 1-4");
-    if (isTutorial && state.tutorial.step === 4 && !hud.itemMenu.classList.contains("hidden")) completeTutorialStep(4);
+    if (isTutorial && state.tutorial.step === tutorialStep.items && !hud.itemMenu.classList.contains("hidden")) completeTutorialStep(tutorialStep.items);
     return;
   }
   if (event.code === "KeyF") {
@@ -1743,7 +2049,7 @@ window.addEventListener("keydown", (event) => {
   if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "KeyW", "KeyA", "KeyS", "KeyD", "ShiftLeft", "ShiftRight"].includes(event.code)) {
     event.preventDefault();
     state.keys.add(event.code);
-    if (isTutorial && state.tutorial.step === 0 && !state.tutorial.advancing) {
+    if (isTutorial && state.tutorial.step === tutorialStep.movement && !state.tutorial.advancing) {
       const direction = {
         ArrowUp: "up", KeyW: "up", ArrowDown: "down", KeyS: "down",
         ArrowLeft: "left", KeyA: "left", ArrowRight: "right", KeyD: "right"
@@ -1751,7 +2057,7 @@ window.addEventListener("keydown", (event) => {
       if (direction) {
         state.tutorial.movementKeys.add(direction);
         refreshTutorialHud();
-        if (state.tutorial.movementKeys.size === 4) completeTutorialStep(0);
+        if (state.tutorial.movementKeys.size === 4) completeTutorialStep(tutorialStep.movement);
       }
     }
   }
@@ -1788,6 +2094,7 @@ window.addEventListener("mousemove", (event) => {
 
 refreshInventory();
 refreshTutorialHud();
+preloadDestination(isTutorial ? "level1.html" : levelId === 1 ? "level0.html" : null);
 let lastTime = performance.now();
 app.ticker.add(() => {
   const now = performance.now();

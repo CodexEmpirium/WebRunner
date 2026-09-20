@@ -51,10 +51,11 @@ public static class SpriteAtlasCleaner
             var outputHeight = outputCellHeight * rows;
             var outputPixels = new int[outputWidth * outputHeight];
 
+            var rowBands = FindRowBands(sourcePixels, normalized.Width, normalized.Height, rows);
             for (var row = 0; row < rows; row++)
             {
-                var y0 = (int)Math.Round(row * normalized.Height / (double)rows);
-                var y1 = (int)Math.Round((row + 1) * normalized.Height / (double)rows);
+                var y0 = rowBands[row].Item1;
+                var y1 = rowBands[row].Item2;
                 var frames = FindFrames(sourcePixels, normalized.Width, y0, y1, columns);
                 for (var column = 0; column < frames.Count; column++)
                     PlaceFrame(sourcePixels, outputPixels, normalized.Width, outputWidth, frames[column],
@@ -122,6 +123,36 @@ public static class SpriteAtlasCleaner
         }
         File.Copy(temporaryPath, path, true);
         File.Delete(temporaryPath);
+    }
+
+    private static List<Tuple<int, int>> FindRowBands(int[] source, int width, int height, int expectedRows)
+    {
+        var runs = new List<Tuple<int, int>>();
+        var start = -1;
+        for (var y = 0; y < height; y++)
+        {
+            var occupied = false;
+            for (var x = 0; x < width; x++)
+            {
+                if (Alpha(source[y * width + x]) <= 8) continue;
+                occupied = true;
+                break;
+            }
+            if (occupied && start < 0) start = y;
+            if (!occupied && start >= 0)
+            {
+                runs.Add(Tuple.Create(start, y));
+                start = -1;
+            }
+        }
+        if (start >= 0) runs.Add(Tuple.Create(start, height));
+        if (runs.Count == expectedRows)
+            return runs.Select(run => Tuple.Create(Math.Max(0, run.Item1 - 2), Math.Min(height, run.Item2 + 2))).ToList();
+        return Enumerable.Range(0, expectedRows)
+            .Select(row => Tuple.Create(
+                (int)Math.Round(row * height / (double)expectedRows),
+                (int)Math.Round((row + 1) * height / (double)expectedRows)))
+            .ToList();
     }
 
     private static List<Component> FindFrames(int[] source, int imageWidth, int y0, int y1, int count)

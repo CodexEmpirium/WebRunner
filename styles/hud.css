@@ -152,6 +152,62 @@ canvas {
   white-space: nowrap;
 }
 
+.skip-tutorial,
+.confirm-actions button {
+  min-height: 28px;
+  border: 1px solid #080706;
+  outline: 1px solid rgba(181, 150, 85, 0.65);
+  background: linear-gradient(180deg, #4c4839, #24251f);
+  color: var(--brass-light);
+  font: 700 10px Georgia, serif;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.skip-tutorial { padding: 6px 10px; white-space: nowrap; }
+.skip-tutorial:hover,
+.skip-tutorial:focus-visible,
+.confirm-actions button:hover,
+.confirm-actions button:focus-visible { color: #fff5d6; outline-color: var(--brass-light); }
+
+.confirm-overlay {
+  position: fixed;
+  z-index: 8;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  pointer-events: auto;
+  background: rgba(0, 0, 0, 0.72);
+}
+
+.confirm-overlay.hidden { display: none; }
+
+.confirm-dialog {
+  width: min(430px, calc(100vw - 32px));
+  padding: 24px;
+  border: 1px solid #0a0907;
+  outline: 1px solid rgba(181, 150, 85, 0.72);
+  background: linear-gradient(180deg, rgba(55, 50, 40, 0.99), rgba(12, 12, 10, 0.99) 30%);
+  box-shadow: inset 0 1px 0 rgba(255, 238, 189, 0.15), 0 20px 70px rgba(0, 0, 0, 0.86);
+  text-align: center;
+}
+
+.confirm-dialog strong {
+  display: block;
+  color: #f5dfaa;
+  font: 700 17px/1.45 Georgia, serif;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 20px;
+}
+
+.confirm-actions button { min-width: 88px; padding: 7px 14px; }
+
 .tutorial-panel {
   position: absolute;
   top: 82px;
