@@ -1,19 +1,57 @@
 async function main() {
-const { Application, Container, Graphics, Matrix, Rectangle, Sprite, Texture } = globalThis.PIXI;
+const { Application, Container, Graphics, Matrix, Rectangle, Sprite, Texture, TilingSprite } = globalThis.PIXI;
 const levelKey = document.body.dataset.level || "1";
 const isTutorial = levelKey === "tutorial";
 const levelId = isTutorial ? null : Number(levelKey);
 const query = new URLSearchParams(window.location.search);
 const isAssetPreload = query.get("preload") === "1";
+const geometryTestCoarse = query.has("geometryTestCoarse") && query.get("geometryTestCoarse") !== "0";
+const geometryTestFine = query.has("geometryTestFine") && query.get("geometryTestFine") !== "0";
+const geometryTestMode = geometryTestFine ? "fine" : geometryTestCoarse ? "coarse" : null;
+const geometryTestFocus = query.get("geometryFocus") || "door";
+const geometryTestView = query.get("geometryView")?.toLowerCase() || null;
+const geometryTestYaw = query.has("cameraYaw") ? Number(query.get("cameraYaw")) : Number.NaN;
+const geometryTestPitch = query.has("cameraPitch") ? Number(query.get("cameraPitch")) : Number.NaN;
 const availableLevels = [0, 1];
 const meter = 48;
 const tile = 64;
+const levelOnePlanScale = 2;
+const itemPickupRadius = meter * 2;
+const waterBasinInset = meter * 0.5;
+const waterBasinDepth = meter * 0.5;
+const waterFlowSpeed = 0.008 * 1.2;
+const columnRadius = meter * 0.5;
+const playerCollisionRadius = 16;
+const floorRenderRadius = 11.2;
 const minPitch = Math.PI / 9;
 const maxPitch = Math.PI * 7 / 18;
 const bombThrowDuration = 0.82;
 const bombReleaseTime = 0.47;
 const gravity = 980;
+const elevatedExitHeight = 112;
+const elevatedChamberWallHeight = 248;
+const elevatedExitKnob = { across: 0.82, up: 0.43 };
+const geometryViewYaw = { north: 0, east: Math.PI / 2, south: Math.PI, west: -Math.PI / 2 };
+if (geometryTestMode && geometryTestView && !(geometryTestView in geometryViewYaw)) {
+  throw new Error(`Unknown geometry view: ${geometryTestView}`);
+}
 const progressStorageKey = "webrunner-progress-v1";
+const abilityGroups = {
+  mana: {
+    duration: 20,
+    options: [
+      { id: "extendedSight", label: "Extended Sight" },
+      { id: "superSprint", label: "Super Sprint" }
+    ]
+  },
+  magic: {
+    duration: 40,
+    options: [
+      { id: "magicField", label: "Magic Field" },
+      { id: "magicSword", label: "Magic Sword" }
+    ]
+  }
+};
 
 function readProgress() {
   let stored = {};
@@ -26,6 +64,10 @@ function readProgress() {
     const value = Number(query.get(name) ?? stored[name]);
     return Number.isFinite(value) ? Math.max(minimum, Math.min(maximum, value)) : fallback;
   };
+  const abilityValue = (group) => {
+    const value = query.get(`${group}Ability`) ?? stored[`${group}Ability`];
+    return abilityGroups[group].options.some((option) => option.id === value) ? value : null;
+  };
   return {
     hp: numberValue("hp", 100, 0, 100),
     coins: numberValue("coins", 0),
@@ -33,7 +75,11 @@ function readProgress() {
     mana: numberValue("mana", 0),
     magic: numberValue("magic", 0),
     bombs: numberValue("bombs", 3),
-    holdingBomb: (query.get("holdingBomb") ?? stored.holdingBomb) === "1"
+    holdingBomb: (query.get("holdingBomb") ?? stored.holdingBomb) === "1",
+    manaAbility: abilityValue("mana"),
+    manaTime: numberValue("manaTime", 0, 0, abilityGroups.mana.duration),
+    magicAbility: abilityValue("magic"),
+    magicTime: numberValue("magicTime", 0, 0, abilityGroups.magic.duration)
   };
 }
 
@@ -42,10 +88,14 @@ const savedProgress = readProgress();
 const state = {
   width: window.innerWidth,
   height: window.innerHeight,
-  yaw: Math.PI / 4,
-  pitch: Math.PI / 4,
-  projectionY: Math.sin(Math.PI / 4),
-  zoom: 1,
+  yaw: geometryTestMode && geometryTestView in geometryViewYaw
+    ? geometryViewYaw[geometryTestView]
+    : geometryTestMode && Number.isFinite(geometryTestYaw)
+      ? geometryTestYaw
+      : geometryTestFine ? -Math.PI / 4 : Math.PI / 4,
+  pitch: geometryTestMode && Number.isFinite(geometryTestPitch) ? clamp(geometryTestPitch, minPitch, maxPitch) : Math.PI / 4,
+  projectionY: Math.sin(geometryTestMode && Number.isFinite(geometryTestPitch) ? clamp(geometryTestPitch, minPitch, maxPitch) : Math.PI / 4),
+  zoom: geometryTestFine ? 1.25 : geometryTestCoarse ? 0.55 : 1,
   fade: query.get("fade") === "1" ? 1 : 0,
   transitioning: false,
   transitionTarget: null,
@@ -54,10 +104,19 @@ const state = {
   projectiles: [],
   explosions: [],
   scorches: [],
+  itemMenuMode: "items",
   inventory: { coins: savedProgress.coins, health: savedProgress.health, mana: savedProgress.mana, magic: savedProgress.magic, bombs: savedProgress.bombs },
+  effects: {
+    mana: { id: savedProgress.manaTime > 0 ? savedProgress.manaAbility : null, remaining: savedProgress.manaAbility ? savedProgress.manaTime : 0 },
+    magic: { id: savedProgress.magicTime > 0 ? savedProgress.magicAbility : null, remaining: savedProgress.magicAbility ? savedProgress.magicTime : 0 }
+  },
   player: {
-    x: 0,
-    y: levelId === 1 ? 360 : 0,
+    x: levelId === 1 && geometryTestFine
+      ? (geometryTestFocus === "water" ? -200 : geometryTestFocus === "columns" ? -120 : 250) * levelOnePlanScale
+      : 0,
+    y: levelId === 1
+      ? (geometryTestMode ? (["water", "columns"].includes(geometryTestFocus) ? -650 : -850) * levelOnePlanScale : 360 * levelOnePlanScale)
+      : 0,
     heading: levelId === 1 ? -Math.PI / 2 : 0,
     speed: 255,
     stride: 0,
@@ -135,11 +194,12 @@ const levels = {
       { x: -380, y: -920, w: 760, h: 580, name: "pool" }
     ],
     platformHeight: 112,
-    upperPlatform: { x: -340, y: -910, w: 690, h: 104 },
-    exit: { x: 292, y: -910, w: 62, h: 42 },
+    upperPlatform: { x: -380, y: -920, w: 760, h: 114 },
+    stairs: { x: -380, bottomY: -430, w: 110, treadDepth: 42, steps: 12 },
+    exit: { x: 292, y: -920, w: 62, h: 42 },
     waterPools: [
-      { x: -248, y: -825, w: 112, h: 420 },
-      { x: 155, y: -825, w: 170, h: 420 }
+      { x: -248, y: -920, w: 112, h: 515 },
+      { x: 155, y: -920, w: 170, h: 515 }
     ],
     coins: [
       { x: -220, y: -770, collected: false },
@@ -154,12 +214,12 @@ const levels = {
       { x: 28, y: -612, type: "mana", color: 0x9b58ff, glow: 0xa058ff, collected: false }
     ],
     columns: [
-      { x: -150, y: -780 },
+      { x: -120, y: -780 },
       { x: 0, y: -780 },
-      { x: 150, y: -780 },
-      { x: -150, y: -535 },
+      { x: 100, y: -780 },
+      { x: -120, y: -535 },
       { x: 0, y: -535 },
-      { x: 150, y: -535 }
+      { x: 100, y: -535 }
     ],
     torches: [
       { x: -230, y: 140 },
@@ -180,6 +240,118 @@ const levels = {
     ]
   }
 };
+
+function scaleLevelPlan(level, factor) {
+  const scaleRect = (rect) => {
+    rect.x *= factor;
+    rect.y *= factor;
+    rect.w *= factor;
+    rect.h *= factor;
+  };
+  const scalePoint = (point) => {
+    point.x *= factor;
+    point.y *= factor;
+  };
+  level.planScale = factor;
+  level.bounds.forEach(scaleRect);
+  scaleRect(level.upperPlatform);
+  level.stairs.x *= factor;
+  level.stairs.bottomY *= factor;
+  level.stairs.w *= factor;
+  level.stairs.steps *= factor;
+  scaleRect(level.exit);
+  level.waterPools.forEach(scaleRect);
+  level.coins.forEach(scalePoint);
+  level.potions.forEach(scalePoint);
+  level.columns.forEach(scalePoint);
+  level.torches.forEach(scalePoint);
+  level.enemies.forEach(scalePoint);
+}
+
+scaleLevelPlan(levels[1], levelOnePlanScale);
+
+function stairGeometry(levelPlan) {
+  const stair = levelPlan.stairs;
+  const topY = levelPlan.upperPlatform.y + levelPlan.upperPlatform.h - stair.treadDepth;
+  const stride = (stair.bottomY - topY) / (stair.steps - 1);
+  return {
+    ...stair,
+    topY,
+    stride,
+    bottomEdge: stair.bottomY + stair.treadDepth,
+    topEdge: topY + stair.treadDepth
+  };
+}
+
+function validateDungeonGeometry(levelPlan) {
+  const room = levelPlan.bounds.find((rect) => rect.name === "pool");
+  const platform = levelPlan.upperPlatform;
+  const stair = stairGeometry(levelPlan);
+  const epsilon = 0.01;
+  const assertTouching = (condition, message) => {
+    if (!condition) throw new Error(`Invalid Level 1 geometry: ${message}`);
+  };
+
+  assertTouching(Math.abs(platform.x - room.x) <= epsilon, "upper platform must meet the left wall");
+  assertTouching(Math.abs(platform.x + platform.w - (room.x + room.w)) <= epsilon, "upper platform must meet the right wall");
+  assertTouching(Math.abs(platform.y - room.y) <= epsilon, "upper platform must meet the back wall");
+  assertTouching(Math.abs(stair.x - platform.x) <= epsilon, "stairs must meet the left wall");
+  assertTouching(Math.abs(stair.topEdge - (platform.y + platform.h)) <= epsilon, "stairs must meet the platform landing");
+  assertTouching(stair.x + stair.w <= platform.x + platform.w + epsilon, "stairs must terminate within the platform");
+  assertTouching(levelPlan.exit.x >= platform.x && levelPlan.exit.x + levelPlan.exit.w <= platform.x + platform.w, "exit must sit on the platform");
+  assertTouching(Math.abs(levelPlan.exit.y - room.y) <= epsilon, "exit must align with the back wall");
+  assertTouching(elevatedChamberWallHeight > levelPlan.platformHeight + elevatedExitHeight, "back wall must extend above the exit");
+}
+
+function validateDungeonFineGeometry(levelPlan) {
+  const headerHeight = elevatedChamberWallHeight - levelPlan.platformHeight - elevatedExitHeight;
+  const stair = stairGeometry(levelPlan);
+  const stairBounds = { x: stair.x, y: stair.topY, w: stair.w, h: stair.bottomEdge - stair.topY };
+  const assertDetail = (condition, message) => {
+    if (!condition) throw new Error(`Invalid Level 1 detail geometry: ${message}`);
+  };
+
+  assertDetail(levelPlan.exit.w > 0 && levelPlan.exit.h > 0, "exit footprint must have positive dimensions");
+  assertDetail(headerHeight > 0, "doorway must retain masonry above the door");
+  assertDetail(elevatedExitKnob.across > 0 && elevatedExitKnob.across < 1, "doorknob must remain within the door width");
+  assertDetail(elevatedExitKnob.up > 0 && elevatedExitKnob.up < 1, "doorknob must remain within the door height");
+  for (const pool of levelPlan.waterPools) {
+    assertDetail(pool.w > waterBasinInset * 2 && pool.h > waterBasinInset * 2, "water pool must contain its inset deep basin");
+    assertDetail(Math.abs(pool.y - levelPlan.bounds.find((rect) => rect.name === "pool").y) <= 0.01, "water pool must terminate at the back wall");
+  }
+  for (const column of levelPlan.columns) {
+    assertDetail(!pointInRect(column.x, column.y, stairBounds, columnRadius), "column footprint must not intersect the stairs");
+    assertDetail(!levelPlan.waterPools.some((pool) => pointInRect(column.x, column.y, pool, columnRadius)), "column footprint must remain on solid ground");
+  }
+}
+
+function validateOrthogonalGeometryViews() {
+  const epsilon = 0.0001;
+  const project = (x, y, z, yaw, pitch) => {
+    const point = rotate(x, y, -yaw);
+    return { x: point.x, y: point.y * Math.sin(pitch) - z };
+  };
+  const sameVector = (a, b, c, d) => Math.abs((b.x - a.x) - (d.x - c.x)) <= epsilon &&
+    Math.abs((b.y - a.y) - (d.y - c.y)) <= epsilon;
+
+  for (const yaw of Object.values(geometryViewYaw)) {
+    for (const pitch of [minPitch, Math.PI / 4, maxPitch]) {
+      const origin = project(0, 0, 0, yaw, pitch);
+      const east = project(100, 0, 0, yaw, pitch);
+      const north = project(0, -100, 0, yaw, pitch);
+      const offset = project(240, 180, 0, yaw, pitch);
+      const offsetEast = project(340, 180, 0, yaw, pitch);
+      const offsetNorth = project(240, 80, 0, yaw, pitch);
+      if (!sameVector(origin, east, offset, offsetEast) || !sameVector(origin, north, offset, offsetNorth)) {
+        throw new Error("Invalid orthogonal projection: parallel geometry changes with position");
+      }
+    }
+  }
+}
+
+validateDungeonGeometry(levels[1]);
+validateDungeonFineGeometry(levels[1]);
+validateOrthogonalGeometryViews();
 
 const level = levels[levelKey] || levels[1];
 state.enemies = (level.enemies || []).map((enemy, index) => ({
@@ -249,24 +421,29 @@ app.stage.addChild(world, overlay);
 
 const floorLayer = new Container();
 const waterLayer = new Container();
+const wallTextureLayer = new Container();
 const g = new Graphics();
 const scenerySpriteLayer = new Container();
 const elevatedLayer = new Graphics();
 const actorLayer = new Container();
 const actorShadow = new Graphics();
+const actorAura = new Graphics();
 const actorSprite = new Sprite(art.action[0][0]);
 const actorFx = new Graphics();
 const entityLayer = new Container();
 const effectsLayer = new Graphics();
 const occlusionSpriteLayer = new Container();
+const occlusionWallTextureLayer = new Container();
 const occlusionLayer = new Graphics();
 actorSprite.anchor.set(0.5, 0.9);
-actorLayer.addChild(actorShadow, actorSprite, actorFx);
+actorLayer.addChild(actorShadow, actorAura, actorSprite, actorFx);
 entityLayer.sortableChildren = true;
 entityLayer.addChild(actorLayer);
-world.addChild(floorLayer, waterLayer, g, scenerySpriteLayer, elevatedLayer, entityLayer, effectsLayer, occlusionSpriteLayer, occlusionLayer);
+world.addChild(floorLayer, waterLayer, wallTextureLayer, g, scenerySpriteLayer, elevatedLayer, entityLayer, effectsLayer, occlusionSpriteLayer, occlusionWallTextureLayer, occlusionLayer);
 let floorSpriteCount = 0;
 const waterSprites = [];
+const wallTextureSprites = new Map();
+const occlusionWallTextureSprites = new Map();
 const scenerySprites = new Map();
 const occlusionSprites = new Map();
 
@@ -309,7 +486,22 @@ async function loadArt() {
     })));
   };
   const floor = Texture.from(floorImage);
-  const wall = Texture.from(wallImage);
+  const wallCropX = Math.round(wallImage.naturalWidth * 0.08);
+  const wallCanvas = document.createElement("canvas");
+  wallCanvas.width = wallImage.naturalWidth - wallCropX * 2;
+  wallCanvas.height = wallImage.naturalHeight;
+  wallCanvas.getContext("2d").drawImage(
+    wallImage,
+    wallCropX,
+    0,
+    wallCanvas.width,
+    wallCanvas.height,
+    0,
+    0,
+    wallCanvas.width,
+    wallCanvas.height
+  );
+  const wall = Texture.from(wallCanvas);
   const water = Texture.from(waterImage);
   floor.source.addressMode = "repeat";
   wall.source.addressMode = "repeat";
@@ -367,12 +559,11 @@ function buildHud(currentLevel) {
       </div>
       <div class="status-line" id="statusLine">World mode</div>
     </div>
+    <div class="active-effects hidden" id="activeEffects" aria-live="polite"></div>
     ${tutorialPanel}
     <div class="item-menu hidden" id="itemMenu">
-      <span>1 Health</span>
-      <span>2 Mana</span>
-      <span>3 Magic</span>
-      <span>4 Bomb</span>
+      <strong id="itemMenuTitle">Use Item</strong>
+      <div class="item-options" id="itemMenuOptions"></div>
     </div>
     ${isTutorial ? `
     <div class="confirm-overlay hidden" id="skipConfirm">
@@ -404,6 +595,9 @@ function buildHud(currentLevel) {
     levelJump: root.querySelector("#levelJump"),
     levelInput: root.querySelector("#levelInput"),
     itemMenu: root.querySelector("#itemMenu"),
+    itemMenuTitle: root.querySelector("#itemMenuTitle"),
+    itemMenuOptions: root.querySelector("#itemMenuOptions"),
+    activeEffects: root.querySelector("#activeEffects"),
     statusLine: root.querySelector("#statusLine"),
     playerHealth: root.querySelector("#playerHealth"),
     coinCount: root.querySelector("#coinCount"),
@@ -429,7 +623,7 @@ function buildHud(currentLevel) {
   if (refs.skipTutorial) {
     const closeSkipConfirmation = () => refs.skipConfirm.classList.add("hidden");
     refs.skipTutorial.addEventListener("click", () => {
-      if (document.pointerLockElement) document.exitPointerLock();
+      restoreBrowserCursor();
       refs.skipConfirm.classList.remove("hidden");
       refs.cancelSkip.focus();
     });
@@ -467,6 +661,43 @@ function refreshInventory() {
   hud.manaCount.textContent = state.inventory.mana;
   hud.magicCount.textContent = state.inventory.magic;
   hud.bombCount.textContent = state.inventory.bombs;
+}
+
+function abilityOption(group, id) {
+  return abilityGroups[group].options.find((option) => option.id === id);
+}
+
+function effectActive(group, id = null) {
+  const effect = state.effects[group];
+  return effect.remaining > 0 && effect.id && (!id || effect.id === id);
+}
+
+function refreshEffectsHud() {
+  const active = Object.entries(state.effects)
+    .filter(([group]) => effectActive(group))
+    .map(([group, effect]) => ({ group, effect, option: abilityOption(group, effect.id) }));
+  const markup = active.map(({ group, effect, option }) =>
+    `<span class="effect-${group}">${option.label} <b>${Math.ceil(effect.remaining)}s</b></span>`).join("");
+  if (hud.activeEffects.innerHTML !== markup) hud.activeEffects.innerHTML = markup;
+  hud.activeEffects.classList.toggle("hidden", active.length === 0);
+  document.documentElement.classList.toggle("extended-sight", effectActive("mana", "extendedSight"));
+}
+
+function showItemMenu(mode = "items") {
+  state.itemMenuMode = mode;
+  const options = mode === "items"
+    ? ["Health", "Mana", "Magic", "Bomb"]
+    : abilityGroups[mode].options.map((option) => option.label);
+  hud.itemMenuTitle.textContent = mode === "items"
+    ? "Use Item"
+    : `${mode === "mana" ? "Mana" : "Magic"} Ability - ${abilityGroups[mode].duration}s`;
+  hud.itemMenuOptions.innerHTML = options.map((label, index) => `<span>${index + 1} ${label}</span>`).join("");
+  hud.itemMenu.classList.remove("hidden");
+}
+
+function closeItemMenu() {
+  hud.itemMenu.classList.add("hidden");
+  state.itemMenuMode = "items";
 }
 
 function setStatus(text) {
@@ -528,7 +759,7 @@ function completeTutorialStep(expectedStep) {
     if (expectedStep === tutorialSteps.length - 1) {
       state.tutorial.portalActive = true;
       state.tutorial.advancing = false;
-      hud.itemMenu.classList.add("hidden");
+      closeItemMenu();
       setStatus("Portal opened");
     } else {
       state.tutorial.step += 1;
@@ -547,7 +778,11 @@ function gameProgress() {
     mana: state.inventory.mana,
     magic: state.inventory.magic,
     bombs: state.inventory.bombs,
-    holdingBomb: state.player.holdingBomb ? "1" : "0"
+    holdingBomb: state.player.holdingBomb ? "1" : "0",
+    manaAbility: state.effects.mana.id || "",
+    manaTime: state.effects.mana.remaining.toFixed(2),
+    magicAbility: state.effects.magic.id || "",
+    magicTime: state.effects.magic.remaining.toFixed(2)
   };
 }
 
@@ -713,13 +948,31 @@ function projectedSprite(sprite, rect, z, texture) {
 function drawWaterPool(pool, index) {
   let sprite = waterSprites[index];
   if (!sprite) {
-    sprite = new Sprite(art.water);
+    sprite = new TilingSprite({ texture: art.water, width: art.water.width, height: art.water.height });
     waterSprites[index] = sprite;
     waterLayer.addChild(sprite);
   }
   projectedSprite(sprite, pool, 0.5, art.water);
-  sprite.alpha = 0.92;
+  sprite.tilePosition.y = -(performance.now() * waterFlowSpeed % art.water.height);
+  sprite.alpha = 0.82;
   sprite.tint = 0xbad6cf;
+}
+
+function waterBasinRect(pool) {
+  return {
+    x: pool.x + waterBasinInset,
+    y: pool.y + waterBasinInset,
+    w: pool.w - waterBasinInset * 2,
+    h: pool.h - waterBasinInset * 2
+  };
+}
+
+function playerInDeepWater() {
+  return level.kind === "dungeon" && level.waterPools.some((pool) => pointInRect(
+    state.player.x,
+    state.player.y,
+    waterBasinRect(pool)
+  ));
 }
 
 function objectSprite(key, texture, foreground = false) {
@@ -753,25 +1006,43 @@ function pointInWalkable(x, y, radius = 0) {
 
 function groundElevation(x, y) {
   if (level.kind !== "dungeon") return 0;
-  const stair = { x: -370, y: -842, w: 100, h: 454 };
-  if (pointInRect(x, y, stair)) {
-    const progress = clamp((-y - 388) / stair.h, 0, 1);
+  const stairPlan = stairGeometry(level);
+  const stairBounds = {
+    x: stairPlan.x,
+    y: stairPlan.topY,
+    w: stairPlan.w,
+    h: stairPlan.bottomEdge - stairPlan.topY
+  };
+  if (pointInRect(x, y, stairBounds)) {
+    const progress = clamp((stairPlan.bottomEdge - y) / (stairPlan.bottomEdge - stairPlan.topEdge), 0, 1);
     return progress * level.platformHeight;
   }
   if (pointInRect(x, y, level.upperPlatform)) return level.platformHeight;
   for (const column of level.columns) {
-    if (Math.hypot(x - column.x, y - column.y) <= 24) return 70;
+    if (Math.hypot(x - column.x, y - column.y) <= columnRadius) return 70;
+  }
+  for (const pool of level.waterPools) {
+    if (pointInRect(x, y, waterBasinRect(pool))) return -waterBasinDepth;
   }
   return 0;
+}
+
+function columnBlocksMovement(x, y, worldZ) {
+  if (level.kind !== "dungeon" || worldZ >= 68) return false;
+  return level.columns.some((column) => (
+    Math.hypot(x - column.x, y - column.y) < columnRadius + playerCollisionRadius
+  ));
 }
 
 function drawInfiniteFloor() {
   const baseX = Math.floor(state.player.x / tile);
   const baseY = Math.floor(state.player.y / tile);
-  for (let gy = baseY - 14; gy <= baseY + 14; gy += 1) {
-    for (let gx = baseX - 14; gx <= baseX + 14; gx += 1) {
+  const radius = floorRenderRadius * (effectActive("mana", "extendedSight") ? 1.5 : 1);
+  const extent = Math.ceil(radius) + 1;
+  for (let gy = baseY - extent; gy <= baseY + extent; gy += 1) {
+    for (let gx = baseX - extent; gx <= baseX + extent; gx += 1) {
       const dist = Math.hypot((gx + 0.5) * tile - state.player.x, (gy + 0.5) * tile - state.player.y);
-      if (dist <= tile * 13.2) drawTile(gx, gy);
+      if (dist <= tile * radius) drawTile(gx, gy);
     }
   }
 }
@@ -779,12 +1050,15 @@ function drawInfiniteFloor() {
 function drawTutorialFloor() {
   const baseX = Math.floor(state.player.x / tile);
   const baseY = Math.floor(state.player.y / tile);
-  for (let gy = baseY - 14; gy <= baseY + 14; gy += 1) {
-    for (let gx = baseX - 14; gx <= baseX + 14; gx += 1) {
+  const radius = floorRenderRadius * (effectActive("mana", "extendedSight") ? 1.5 : 1);
+  const bounds = level.bounds[0];
+  const extent = Math.ceil(radius) + 1;
+  for (let gy = baseY - extent; gy <= baseY + extent; gy += 1) {
+    for (let gx = baseX - extent; gx <= baseX + extent; gx += 1) {
       const centerX = gx * tile + tile / 2;
       const centerY = gy * tile + tile / 2;
       const dist = Math.hypot(centerX - state.player.x, centerY - state.player.y);
-      if (dist <= tile * 13.2) drawTile(gx, gy);
+      if (dist <= tile * radius && pointInRect(centerX, centerY, bounds)) drawTile(gx, gy);
     }
   }
   if (state.tutorial.portalActive) drawPortal();
@@ -831,12 +1105,7 @@ function drawDungeonFloor() {
   level.waterPools.forEach((pool, index) => {
     drawWaterPool(pool, index);
     rectWorld(pool, 0x153d43, 0x9ab1a8, 0.08);
-    const wave = (performance.now() * 0.025) % 46;
-    for (let y = pool.y + 24 - wave; y < pool.y + pool.h; y += 46) {
-      const start = worldToScreen(pool.x + 16, y);
-      const end = worldToScreen(pool.x + pool.w - 16, y + 10);
-      line(start, end, 0x9bc9c2, 2, 0.2);
-    }
+    rectWorld(waterBasinRect(pool), 0x343a3b, 0x667174, 0.5);
     rectWorld({ x: pool.x + 7, y: pool.y + 7, w: pool.w - 14, h: pool.h - 14 }, 0x2b7276, null, 0.06);
   });
   drawWalls();
@@ -846,55 +1115,162 @@ function drawDungeonFloor() {
 }
 
 function drawWalls(target = g, foregroundOnly = false) {
+  const planScale = level.planScale || 1;
+  const s = (value) => value * planScale;
   const segments = [
-    [-300, 140, -56, 140, 0x241e18], [56, 140, 300, 140, 0x241e18], [300, 140, 300, 600, 0x191510],
-    [300, 600, -300, 600, 0x2d261e], [-300, 600, -300, 140, 0x17130f], [-56, 140, -56, -340, 0x17130f],
-    [56, -340, 56, 140, 0x191510], [-380, -340, -56, -340, 0x241e18], [56, -340, 380, -340, 0x241e18],
-    [380, -340, 380, -920, 0x191510], [380, -920, 354, -920, 0x2d261e], [292, -920, -380, -920, 0x2d261e],
-    [-380, -920, -380, -340, 0x17130f]
+    [s(-300), s(140), s(-56), s(140), 0x241e18], [s(56), s(140), s(300), s(140), 0x241e18], [s(300), s(140), s(300), s(600), 0x191510],
+    [s(300), s(600), s(-300), s(600), 0x2d261e], [s(-300), s(600), s(-300), s(140), 0x17130f], [s(-56), s(140), s(-56), s(-340), 0x17130f],
+    [s(56), s(-340), s(56), s(140), 0x191510], [s(-380), s(-340), s(-56), s(-340), 0x241e18], [s(56), s(-340), s(380), s(-340), 0x241e18],
+    [s(380), s(-340), s(380), s(-920), 0x191510], [s(380), s(-920), s(354), s(-920), 0x2d261e], [s(292), s(-920), s(-380), s(-920), 0x2d261e],
+    [s(-380), s(-920), s(-380), s(-340), 0x17130f]
   ];
   for (const [x1, y1, x2, y2, fill] of segments) {
-    if (foregroundOnly && cameraDepth((x1 + x2) / 2, (y1 + y2) / 2) <= 8) continue;
+    const visible = foregroundOnly ? clipSegmentInFront(x1, y1, x2, y2) : { x1, y1, x2, y2 };
+    if (!visible) continue;
     const midpointY = (y1 + y2) / 2;
-    const wallHeight = midpointY <= -340 ? 138 : midpointY < 140 ? 98 : 80;
-    drawWallSegment(x1, y1, x2, y2, fill, wallHeight, target);
+    const wallHeight = midpointY <= s(-340) ? elevatedChamberWallHeight : midpointY < s(140) ? 98 : 80;
+    drawWallSegment(
+      visible.x1,
+      visible.y1,
+      visible.x2,
+      visible.y2,
+      fill,
+      wallHeight,
+      target,
+      0,
+      true,
+      `wall:${x1}:${y1}:${x2}:${y2}:${wallHeight}`
+    );
+  }
+  drawElevatedDoorwayWall(target, foregroundOnly);
+  drawWaterTunnels(target, foregroundOnly);
+}
+
+function clipSegmentInFront(x1, y1, x2, y2, margin = 8) {
+  const depth1 = cameraDepth(x1, y1) - margin;
+  const depth2 = cameraDepth(x2, y2) - margin;
+  if (depth1 <= 0 && depth2 <= 0) return null;
+  if (depth1 > 0 && depth2 > 0) return { x1, y1, x2, y2 };
+
+  const ratio = depth1 / (depth1 - depth2);
+  const cutX = x1 + (x2 - x1) * ratio;
+  const cutY = y1 + (y2 - y1) * ratio;
+  return depth1 > 0
+    ? { x1, y1, x2: cutX, y2: cutY }
+    : { x1: cutX, y1: cutY, x2, y2 };
+}
+
+function drawWaterTunnels(target = g, foregroundOnly = false) {
+  const tunnelHeight = 74;
+  const y = level.bounds.find((rect) => rect.name === "pool").y - 0.5;
+  for (const pool of level.waterPools) {
+    const inset = 7;
+    const visible = foregroundOnly
+      ? clipSegmentInFront(pool.x + inset, y, pool.x + pool.w - inset, y)
+      : { x1: pool.x + inset, y1: y, x2: pool.x + pool.w - inset, y2: y };
+    if (!visible) continue;
+    const x1 = visible.x1;
+    const x2 = visible.x2;
+    const bottomLeft = worldToScreen(x1, y, 0);
+    const bottomRight = worldToScreen(x2, y, 0);
+    const topRight = worldToScreen(x2, y, tunnelHeight);
+    const topLeft = worldToScreen(x1, y, tunnelHeight);
+    poly([bottomLeft, bottomRight, topRight, topLeft], 0x020607, 0x172526, 3, 0.96, target);
+    line(
+      worldToScreen(x1 + 8, y - 0.2, 10),
+      worldToScreen(x2 - 8, y - 0.2, 10),
+      0x32666a,
+      2,
+      0.72,
+      target
+    );
   }
 }
 
-function drawWallSegment(x1, y1, x2, y2, fill, wallHeight, target = g) {
+function drawWallSegment(x1, y1, x2, y2, fill, wallHeight, target = g, baseZ = 0, finishTop = true, textureKey = null) {
   const h = wallHeight * state.zoom;
-  const a = worldToScreen(x1, y1);
-  const b = worldToScreen(x2, y2);
+  const a = worldToScreen(x1, y1, baseZ);
+  const b = worldToScreen(x2, y2, baseZ);
   const face = [{ x: a.x, y: a.y }, { x: b.x, y: b.y }, { x: b.x, y: b.y - h }, { x: a.x, y: a.y - h }];
-  target.poly(face.flatMap((point) => [point.x, point.y])).fill({ color: fill, alpha: 1 });
-  target.poly(face.flatMap((point) => [point.x, point.y])).fill({
-    texture: art.wall,
-    color: 0xd2c4ae,
-    matrix: new Matrix().scale(0.13),
-    alpha: 1
-  }).stroke({ color: 0x050403, width: 3 });
-  target.poly(face.flatMap((point) => [point.x, point.y])).fill({ color: fill, alpha: 0.12 });
-  const dx = b.x - a.x;
-  const dy = b.y - a.y;
-  const length = Math.hypot(dx, dy) || 1;
-  const lipX = -dy / length * 9;
-  const lipY = dx / length * 9;
-  poly([
-    { x: a.x, y: a.y - h }, { x: b.x, y: b.y - h },
-    { x: b.x + lipX, y: b.y - h + lipY }, { x: a.x + lipX, y: a.y - h + lipY }
-  ], 0x4b443b, 0x100d0a, 2, 1, target);
-  const fadeHeight = Math.max(4, h * 0.05);
-  const fadeSteps = 5;
-  for (let i = 0; i < fadeSteps; i += 1) {
-    const lower = i / fadeSteps;
-    const upper = (i + 1) / fadeSteps;
+  drawWallTextureSprite(x1, y1, x2, y2, wallHeight, baseZ, target === occlusionLayer, textureKey);
+  target.poly(face.flatMap((point) => [point.x, point.y])).fill({ color: fill, alpha: 0.34 }).stroke({ color: 0x050403, width: 3 });
+  if (finishTop) {
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const length = Math.hypot(dx, dy) || 1;
+    const lipX = -dy / length * 9;
+    const lipY = dx / length * 9;
     poly([
-      { x: a.x, y: a.y - h + fadeHeight * lower },
-      { x: b.x, y: b.y - h + fadeHeight * lower },
-      { x: b.x, y: b.y - h + fadeHeight * upper },
-      { x: a.x, y: a.y - h + fadeHeight * upper }
-    ], 0x77746f, null, 1, 0.36 - i * 0.065, target);
+      { x: a.x, y: a.y - h }, { x: b.x, y: b.y - h },
+      { x: b.x + lipX, y: b.y - h + lipY }, { x: a.x + lipX, y: a.y - h + lipY }
+    ], 0x4b443b, 0x100d0a, 2, 1, target);
+    const fadeHeight = Math.max(4, h * 0.05);
+    const fadeSteps = 5;
+    for (let i = 0; i < fadeSteps; i += 1) {
+      const lower = i / fadeSteps;
+      const upper = (i + 1) / fadeSteps;
+      poly([
+        { x: a.x, y: a.y - h + fadeHeight * lower },
+        { x: b.x, y: b.y - h + fadeHeight * lower },
+        { x: b.x, y: b.y - h + fadeHeight * upper },
+        { x: a.x, y: a.y - h + fadeHeight * upper }
+      ], 0x77746f, null, 1, 0.36 - i * 0.065, target);
+    }
   }
+}
+
+function drawWallTextureSprite(x1, y1, x2, y2, wallHeight, baseZ, foreground, textureKey = null) {
+  const sprites = foreground ? occlusionWallTextureSprites : wallTextureSprites;
+  const layer = foreground ? occlusionWallTextureLayer : wallTextureLayer;
+  const key = textureKey || `${x1}:${y1}:${x2}:${y2}:${wallHeight}:${baseZ}`;
+  let sprite = sprites.get(key);
+  if (!sprite) {
+    sprite = new TilingSprite({ texture: art.wall, width: 1, height: 1 });
+    sprite.anchor.set(0, 0);
+    sprite.tileScale.set(0.28);
+    sprites.set(key, sprite);
+    layer.addChild(sprite);
+  }
+
+  const segmentLength = Math.hypot(x2 - x1, y2 - y1) || 1;
+  const a = worldToScreen(x1, y1, baseZ);
+  const b = worldToScreen(x2, y2, baseZ);
+  sprite.visible = true;
+  sprite.width = segmentLength;
+  sprite.height = wallHeight;
+  sprite.alpha = 0.96;
+  sprite.tint = 0xc9b99f;
+  sprite.setFromMatrix(new Matrix(
+    (b.x - a.x) / segmentLength,
+    (b.y - a.y) / segmentLength,
+    0,
+    -state.zoom,
+    a.x,
+    a.y
+  ));
+}
+
+function drawElevatedDoorwayWall(target = g, foregroundOnly = false) {
+  const x1 = level.exit.x;
+  const x2 = level.exit.x + level.exit.w;
+  const y = level.exit.y;
+  const visible = foregroundOnly ? clipSegmentInFront(x1, y, x2, y) : { x1, y1: y, x2, y2: y };
+  if (!visible) return;
+
+  drawWallSegment(visible.x1, visible.y1, visible.x2, visible.y2, 0x2d261e, level.platformHeight, target, 0, false, `door-base:${x1}:${x2}`);
+  const headerBase = level.platformHeight + elevatedExitHeight;
+  drawWallSegment(
+    visible.x1,
+    visible.y1,
+    visible.x2,
+    visible.y2,
+    0x2d261e,
+    elevatedChamberWallHeight - headerBase,
+    target,
+    headerBase,
+    true,
+    `door-header:${x1}:${x2}`
+  );
 }
 
 function texturedFace(points, texture, tint = 0xffffff, alpha = 1, scale = 0.13, target = g) {
@@ -958,8 +1334,8 @@ function drawElevatedExit(target = g) {
   const z = level.platformHeight;
   const x1 = level.exit.x;
   const x2 = level.exit.x + level.exit.w;
-  const y = -919;
-  const height = 112;
+  const y = level.bounds[2].y + 1;
+  const height = elevatedExitHeight;
   const bottomLeft = worldToScreen(x1, y, z);
   const bottomRight = worldToScreen(x2, y, z);
   const topRight = worldToScreen(x2, y, z + height);
@@ -979,19 +1355,19 @@ function drawElevatedExit(target = g) {
   line(topLeft, topRight, 0xe2c078, 5, 0.9, target);
   line(bottomLeft, topLeft, 0x72552e, 4, 0.95, target);
   line(bottomRight, topRight, 0x72552e, 4, 0.95, target);
-  target.circle(bottomRight.x - 9 * state.zoom, bottomRight.y - 42 * state.zoom, 3 * state.zoom).fill(0xd4a64e);
+  const knob = {
+    x: bottomLeft.x + (bottomRight.x - bottomLeft.x) * elevatedExitKnob.across + (topLeft.x - bottomLeft.x) * elevatedExitKnob.up,
+    y: bottomLeft.y + (bottomRight.y - bottomLeft.y) * elevatedExitKnob.across + (topLeft.y - bottomLeft.y) * elevatedExitKnob.up
+  };
+  target.circle(knob.x, knob.y, 3 * state.zoom).fill(0xd4a64e).stroke({ color: 0x4d3217, width: 1.5 * state.zoom });
 }
 
 function drawStairs(target = g, foregroundOnly = false) {
-  const steps = 12;
-  const width = 100;
-  const depth = 42;
-  const stride = 37;
-  const startY = -430;
-  for (let i = 0; i < steps; i += 1) {
-    const z = level.platformHeight * (i + 1) / steps;
-    const previousZ = level.platformHeight * i / steps;
-    const rect = { x: -370, y: startY - i * stride, w: width, h: depth };
+  const stair = stairGeometry(level);
+  for (let i = 0; i < stair.steps; i += 1) {
+    const z = level.platformHeight * (i + 1) / stair.steps;
+    const previousZ = level.platformHeight * i / stair.steps;
+    const rect = { x: stair.x, y: stair.bottomY - i * stair.stride, w: stair.w, h: stair.treadDepth };
     if (foregroundOnly && cameraDepth(rect.x + rect.w / 2, rect.y + rect.h / 2) <= 10) continue;
     const top = [
       worldToScreen(rect.x, rect.y, z), worldToScreen(rect.x + rect.w, rect.y, z),
@@ -1073,14 +1449,14 @@ function drawColumn(column, target = g) {
 function drawCoin(coin, target = g) {
   const p = worldToScreen(coin.x, coin.y);
   const bob = Math.sin(performance.now() * 0.004 + coin.x) * 3 * state.zoom;
-  const y = p.y - 8 * state.zoom + bob;
-  target.ellipse(p.x + 3, p.y + 3, 10 * state.zoom, 4 * state.zoom).fill({ color: 0x000000, alpha: 0.38 });
+  const y = p.y - 24 * state.zoom + bob;
+  target.ellipse(p.x + 5, p.y + 4, 30 * state.zoom, 12 * state.zoom).fill({ color: 0x000000, alpha: 0.38 });
   const frame = Math.floor(performance.now() / 115 + hash(coin.x, coin.y, 31) * art.coin.length) % art.coin.length;
   const texture = art.coin[frame];
   const foreground = target === occlusionLayer;
   const sprite = objectSprite(`coin:${coin.x}:${coin.y}`, texture, foreground);
   sprite.anchor.set(0.5);
-  const scale = 29 * state.zoom / texture.height;
+  const scale = 87 * state.zoom / texture.height;
   sprite.scale.set(scale);
   sprite.position.set(p.x, y);
   sprite.tint = 0xffefbd;
@@ -1101,7 +1477,8 @@ function drawPotion(potion, target = g) {
 }
 
 function drawTorch(torch) {
-  const roomWallHeight = torch.y <= -340 ? 138 : torch.y < 140 ? 98 : 80;
+  const planScale = level.planScale || 1;
+  const roomWallHeight = torch.y <= -340 * planScale ? elevatedChamberWallHeight : torch.y < 140 * planScale ? 98 : 80;
   const flameHeight = 54;
   const mountZ = Math.max(8, roomWallHeight * 0.95 - flameHeight);
   const p = worldToScreen(torch.x, torch.y, mountZ);
@@ -1304,6 +1681,7 @@ function drawCharacter() {
   }
 
   actorShadow.clear();
+  actorAura.clear();
   actorFx.clear();
   const baseX = state.width / 2;
   const baseY = state.height / 2 + 18;
@@ -1334,6 +1712,19 @@ function drawCharacter() {
   actorSprite.rotation = rolling ? (1 - player.rollTime / 0.55) * Math.PI * 2 * player.rollDirection : poseRotation;
   actorSprite.alpha = 1;
 
+  const auraPulse = 1 + Math.sin(performance.now() * 0.007) * 0.045;
+  const auraCenterY = actorSprite.y - targetHeight * state.zoom * 0.48;
+  if (effectActive("mana")) {
+    actorAura.ellipse(actorSprite.x, auraCenterY, 42 * state.zoom * auraPulse, targetHeight * state.zoom * 0.52 * auraPulse)
+      .stroke({ color: 0x51d7ee, width: 7 * state.zoom, alpha: 0.22 });
+  }
+  if (effectActive("magic")) {
+    const fieldActive = effectActive("magic", "magicField");
+    actorAura.ellipse(actorSprite.x, auraCenterY, (fieldActive ? 53 : 45) * state.zoom * auraPulse, targetHeight * state.zoom * (fieldActive ? 0.58 : 0.53) * auraPulse)
+      .fill({ color: fieldActive ? 0x6d8cff : 0x678dff, alpha: fieldActive ? 0.07 : 0.035 })
+      .stroke({ color: fieldActive ? 0x9eb8ff : 0x79aaff, width: (fieldActive ? 8 : 5) * state.zoom, alpha: fieldActive ? 0.32 : 0.2 });
+  }
+
   if (player.stealth && sheet !== art.runStealth && player.rollTime <= 0) {
     const hoodYFactor = player.stance === "crawl" ? 0.2 : player.stance === "crouch" ? 0.62 : 0.72;
     const hoodX = actorSprite.x;
@@ -1356,11 +1747,53 @@ function drawCharacter() {
 
   if (player.attackTime > 0) {
     const attackProgress = 1 - player.attackTime / 0.28;
-    const start = -1.15 + attackProgress * 0.65;
-    actorFx.arc(baseX, baseY - 46 - player.z, 62 * state.zoom, start, start + 1.25)
-      .stroke({ color: 0xf3d69a, width: 5 * state.zoom, alpha: 0.42 });
-    actorFx.arc(baseX, baseY - 46 - player.z, 69 * state.zoom, start + 0.12, start + 1.05)
-      .stroke({ color: 0xffffff, width: 1.5 * state.zoom, alpha: 0.72 });
+    const attackDirection = groundDirection(player.heading);
+    const facingAngle = Math.atan2(attackDirection.y, attackDirection.x);
+    const sweepOffset = (attackProgress - 0.5) * 0.5;
+    const start = facingAngle - 0.68 + sweepOffset;
+    const end = facingAngle + 0.68 + sweepOffset;
+    const centerX = baseX + attackDirection.x * 10 * state.zoom;
+    const centerY = baseY - 46 - player.z + attackDirection.y * 10 * state.zoom;
+    const magicSword = effectActive("magic", "magicSword");
+    actorFx.arc(centerX, centerY, 62 * state.zoom, start, end)
+      .stroke({ color: magicSword ? 0x66d9ff : 0xf3d69a, width: (magicSword ? 8 : 5) * state.zoom, alpha: magicSword ? 0.62 : 0.42 });
+    actorFx.arc(centerX, centerY, 69 * state.zoom, start + 0.12, end - 0.12)
+      .stroke({ color: magicSword ? 0xdaf8ff : 0xffffff, width: 1.5 * state.zoom, alpha: 0.82 });
+  }
+
+  if (effectActive("magic", "magicSword")) {
+    const direction = groundDirection(player.heading);
+    const hand = { x: actorSprite.x + direction.x * 10 * state.zoom, y: actorSprite.y - 52 * state.zoom + direction.y * 7 * state.zoom };
+    const tip = { x: hand.x + direction.x * 54 * state.zoom, y: hand.y + direction.y * 40 * state.zoom };
+    line(hand, tip, 0x3ebfe9, 8 * state.zoom, 0.22, actorFx);
+    line(hand, tip, 0xbdefff, 2.2 * state.zoom, 0.9, actorFx);
+    actorFx.circle(tip.x, tip.y, 4.5 * state.zoom).fill({ color: 0xa9efff, alpha: 0.45 });
+  }
+
+  if (effectActive("mana", "superSprint") && moving && player.stance === "stand") {
+    const direction = groundDirection(player.heading);
+    for (let i = 0; i < 5; i += 1) {
+      const spread = (i - 2) * 12 * state.zoom;
+      const start = {
+        x: baseX - direction.x * (26 + i * 11) * state.zoom - direction.y * spread,
+        y: baseY - 28 * state.zoom - direction.y * (17 + i * 7) * state.zoom + direction.x * spread * 0.35
+      };
+      const end = { x: start.x - direction.x * 46 * state.zoom, y: start.y - direction.y * 28 * state.zoom };
+      line(start, end, i % 2 ? 0x7de8ff : 0xc8f8ff, (i % 2 ? 2.5 : 1.5) * state.zoom, 0.42 - i * 0.045, actorAura);
+    }
+  }
+
+  if (playerInDeepWater()) {
+    const surfaceY = baseY - 21 * state.zoom;
+    const lowerY = baseY + 9 * state.zoom;
+    const ripple = Math.sin(performance.now() * 0.004) * 1.8 * state.zoom;
+    actorFx.ellipse(baseX, (surfaceY + lowerY) / 2, 38 * state.zoom, 22 * state.zoom)
+      .fill({ color: 0x174f54, alpha: 0.36 });
+    actorFx.ellipse(baseX, surfaceY + ripple, 37 * state.zoom, 7 * state.zoom)
+      .fill({ color: 0x3d8589, alpha: 0.2 })
+      .stroke({ color: 0x8eb4b1, width: 1.2 * state.zoom, alpha: 0.34 });
+    actorFx.arc(baseX, surfaceY + 2 * state.zoom + ripple, 26 * state.zoom, 0.1, Math.PI - 0.1)
+      .stroke({ color: 0xa7c8c2, width: 1 * state.zoom, alpha: 0.24 });
   }
 
 }
@@ -1422,8 +1855,21 @@ function drawEnemies() {
 }
 
 function drawLight() {
-  const radius = Math.min(state.width, state.height) * 0.34;
+  const radius = Math.min(state.width, state.height) * 0.34 * 0.75 * (effectActive("mana", "extendedSight") ? 1.5 : 1);
   g.circle(state.width / 2, state.height / 2, radius).fill({ color: 0xf0a85a, alpha: 0.045 });
+}
+
+function updateEffects(delta) {
+  for (const [group, effect] of Object.entries(state.effects)) {
+    if (effect.remaining <= 0) continue;
+    effect.remaining = Math.max(0, effect.remaining - delta);
+    if (effect.remaining === 0) {
+      const option = abilityOption(group, effect.id);
+      effect.id = null;
+      setStatus(`${option?.label || group} expired`);
+    }
+  }
+  refreshEffectsHud();
 }
 
 function isMoving() {
@@ -1436,14 +1882,15 @@ function walkableRegionIndex(x, y) {
 }
 
 function slimeNavigationGoal(enemy) {
+  const planScale = level.planScale || 1;
   const enemyRegion = walkableRegionIndex(enemy.x, enemy.y);
   const playerRegion = walkableRegionIndex(state.player.x, state.player.y);
-  if (state.player.floorZ > 20 && groundElevation(enemy.x, enemy.y) < 20) return { x: -320, y: -410 };
+  if (state.player.floorZ > 20 && groundElevation(enemy.x, enemy.y) < 20) return { x: -320 * planScale, y: -410 * planScale };
   if (enemyRegion === playerRegion || enemyRegion < 0 || playerRegion < 0) return state.player;
-  if (enemyRegion === 2) return { x: 0, y: -330 };
-  if (enemyRegion === 1 && playerRegion === 0) return { x: 0, y: 150 };
-  if (enemyRegion === 1 && playerRegion === 2) return { x: 0, y: -330 };
-  return { x: 0, y: 130 };
+  if (enemyRegion === 2) return { x: 0, y: -330 * planScale };
+  if (enemyRegion === 1 && playerRegion === 0) return { x: 0, y: 150 * planScale };
+  if (enemyRegion === 1 && playerRegion === 2) return { x: 0, y: -330 * planScale };
+  return { x: 0, y: 130 * planScale };
 }
 
 function slimePathClear(enemy, targetX, targetY) {
@@ -1496,6 +1943,20 @@ function defeatEnemy(enemy) {
   return true;
 }
 
+function damagePlayer(amount, source) {
+  const player = state.player;
+  if (effectActive("magic", "magicField")) {
+    player.contactDamageCooldown = 0.25;
+    setStatus(`Magic Field blocked ${source}`);
+    return false;
+  }
+  player.health = Math.max(0, player.health - amount);
+  player.hitFlash = 0.24;
+  refreshInventory();
+  setStatus(`${source} dealt ${amount} damage`);
+  return true;
+}
+
 function updateEnemies(delta) {
   const player = state.player;
   player.contactDamageCooldown = Math.max(0, player.contactDamageCooldown - delta);
@@ -1530,11 +1991,8 @@ function updateEnemies(delta) {
     }
     const sameHeight = Math.abs((groundElevation(enemy.x, enemy.y) + enemy.z) - (player.floorZ + player.z)) < 30;
     if (sameHeight && Math.hypot(player.x - enemy.x, player.y - enemy.y) < 34 && player.contactDamageCooldown <= 0) {
-      player.health = Math.max(0, player.health - enemy.contactDamage);
       player.contactDamageCooldown = 1;
-      player.hitFlash = 0.24;
-      refreshInventory();
-      setStatus(`${enemy.name} dealt ${enemy.contactDamage} damage`);
+      damagePlayer(enemy.contactDamage, enemy.name);
     }
   }
 }
@@ -1645,6 +2103,7 @@ function drawBombEffects() {
 }
 
 function update(delta) {
+  updateEffects(delta);
   let mx = 0;
   let my = 0;
   if (state.keys.has("ArrowUp") || state.keys.has("KeyW")) my -= 1;
@@ -1691,7 +2150,8 @@ function update(delta) {
     player.lastMoveY = my;
     const worldMove = rotate(mx, my, state.yaw);
     const stanceSpeed = player.stance === "crawl" ? 0.28 : player.stance === "crouch" ? 0.45 : 1;
-    const speed = player.speed * (sprinting && player.stance === "stand" ? 1.75 : 1) * stanceSpeed;
+    const abilitySpeed = effectActive("mana", "superSprint") && player.stance === "stand" ? 2 : 1;
+    const speed = player.speed * (sprinting && player.stance === "stand" ? 1.75 : 1) * stanceSpeed * abilitySpeed;
     const distance = movePlayer(worldMove.x * speed * delta, worldMove.y * speed * delta);
     if (tutorial && tutorial.step === tutorialStep.sprint && sprinting && !tutorial.advancing) {
       tutorial.sprintDistance += distance;
@@ -1750,12 +2210,14 @@ function update(delta) {
   if (level.kind === "dungeon") {
     player.floorZ = groundElevation(player.x, player.y);
     collectItems();
-    const targetZoom = pointInRect(player.x, player.y, level.bounds[1], 26) ? 1.65 : 1;
-    state.zoom += (targetZoom - state.zoom) * (1 - Math.exp(-5 * delta));
     if (!state.transitioning && player.floorZ >= level.platformHeight * 0.85 && pointInRect(player.x, player.y, level.exit, 10)) {
       startTransition("level0.html?fade=1");
     }
   }
+  const areaZoom = level.kind === "dungeon" && pointInRect(player.x, player.y, level.bounds[1], 26) ? 1.65 : 1;
+  const geometryZoom = geometryTestFine ? 1.25 : geometryTestCoarse ? 0.55 : 1;
+  const targetZoom = areaZoom * (effectActive("mana", "extendedSight") ? 0.86 : 1) * geometryZoom;
+  state.zoom += (targetZoom - state.zoom) * (1 - Math.exp(-5 * delta));
 
   updateBombs(delta);
   updateEnemies(delta);
@@ -1775,23 +2237,38 @@ function movePlayer(dx, dy) {
   const startY = player.y;
   const nextX = player.x + dx;
   const nextY = player.y + dy;
-  const maxStepHeight = 18;
+  const maxStepHeight = waterBasinDepth;
   let currentElevation = groundElevation(player.x, player.y);
   let airborneWorldZ = currentElevation + player.z;
   const canTraverse = (elevation) => player.grounded
-    ? Math.abs(elevation - currentElevation) <= maxStepHeight
+    ? elevation <= currentElevation + maxStepHeight
     : elevation <= airborneWorldZ + 2;
   const applyElevation = (elevation) => {
+    if (player.grounded && elevation < currentElevation - maxStepHeight) {
+      airborneWorldZ = currentElevation;
+      player.grounded = false;
+      player.vz = 0;
+      player.jumpAge = 0;
+      player.jumpArm = 0;
+    }
     if (!player.grounded) player.z = Math.max(0, airborneWorldZ - elevation);
     currentElevation = elevation;
   };
   const nextXElevation = groundElevation(nextX, player.y);
-  if (pointInWalkable(nextX, player.y, 16) && canTraverse(nextXElevation)) {
+  if (
+    pointInWalkable(nextX, player.y, playerCollisionRadius)
+    && !columnBlocksMovement(nextX, player.y, airborneWorldZ)
+    && canTraverse(nextXElevation)
+  ) {
     player.x = nextX;
     applyElevation(nextXElevation);
   }
   const nextYElevation = groundElevation(player.x, nextY);
-  if (pointInWalkable(player.x, nextY, 16) && canTraverse(nextYElevation)) {
+  if (
+    pointInWalkable(player.x, nextY, playerCollisionRadius)
+    && !columnBlocksMovement(player.x, nextY, airborneWorldZ)
+    && canTraverse(nextYElevation)
+  ) {
     player.y = nextY;
     applyElevation(nextYElevation);
   }
@@ -1801,14 +2278,14 @@ function movePlayer(dx, dy) {
 
 function collectItems() {
   for (const coin of level.coins) {
-    if (!coin.collected && Math.hypot(state.player.x - coin.x, state.player.y - coin.y) < 26) {
+    if (!coin.collected && Math.hypot(state.player.x - coin.x, state.player.y - coin.y) <= itemPickupRadius) {
       coin.collected = true;
       state.inventory.coins += 1;
       refreshInventory();
     }
   }
   for (const potion of level.potions) {
-    if (!potion.collected && Math.hypot(state.player.x - potion.x, state.player.y - potion.y) < 28) {
+    if (!potion.collected && Math.hypot(state.player.x - potion.x, state.player.y - potion.y) <= itemPickupRadius) {
       potion.collected = true;
       state.inventory[potion.type] += 1;
       refreshInventory();
@@ -1823,6 +2300,8 @@ function render() {
   occlusionLayer.clear();
   floorSpriteCount = 0;
   for (const sprite of waterSprites) sprite.visible = false;
+  for (const sprite of wallTextureSprites.values()) sprite.visible = false;
+  for (const sprite of occlusionWallTextureSprites.values()) sprite.visible = false;
   for (const sprite of scenerySprites.values()) sprite.visible = false;
   for (const sprite of occlusionSprites.values()) sprite.visible = false;
   if (level.kind === "infinite") drawInfiniteFloor();
@@ -1841,12 +2320,33 @@ function render() {
 }
 
 function chooseItem(slot) {
+  if (state.itemMenuMode !== "items") {
+    const group = state.itemMenuMode;
+    const option = abilityGroups[group].options[slot - 1];
+    if (!option) {
+      setStatus("Choose ability 1 or 2");
+      return;
+    }
+    if (state.inventory[group] <= 0) {
+      closeItemMenu();
+      setStatus(`No ${group}`);
+      return;
+    }
+    state.inventory[group] -= 1;
+    state.effects[group].id = option.id;
+    state.effects[group].remaining = abilityGroups[group].duration;
+    closeItemMenu();
+    refreshInventory();
+    refreshEffectsHud();
+    setStatus(`${option.label}: ${abilityGroups[group].duration} seconds`);
+    return;
+  }
   if (isTutorial && state.tutorial.step === tutorialStep.selectItem && slot !== 4) {
     setStatus("Select bomb with 4");
     return;
   }
-  hud.itemMenu.classList.add("hidden");
   if (slot === 4) {
+    closeItemMenu();
     if (state.inventory.bombs > 0) {
       state.player.holdingBomb = true;
       setStatus("Bomb ready");
@@ -1855,12 +2355,21 @@ function chooseItem(slot) {
     return;
   }
   const type = ["health", "mana", "magic"][slot - 1];
-  if (state.inventory[type] > 0) {
-    state.inventory[type] -= 1;
-    if (type === "health") state.player.health = Math.min(state.player.maxHealth, state.player.health + 35);
-    refreshInventory();
-    setStatus(`Used ${type}`);
-  } else setStatus(`No ${type}`);
+  if (!type || state.inventory[type] <= 0) {
+    closeItemMenu();
+    setStatus(`No ${type || "item"}`);
+    return;
+  }
+  if (type === "mana" || type === "magic") {
+    showItemMenu(type);
+    setStatus(`Choose ${type} ability 1-2`);
+    return;
+  }
+  closeItemMenu();
+  state.inventory.health -= 1;
+  state.player.health = Math.min(state.player.maxHealth, state.player.health + 35);
+  refreshInventory();
+  setStatus("Used health");
 }
 
 function useWeapon() {
@@ -1880,7 +2389,8 @@ function useWeapon() {
     .filter((candidate) => candidate.distance <= 100 && candidate.facing >= 0.15 && candidate.sameHeight)
     .sort((a, b) => a.distance - b.distance)[0]?.enemy;
   if (target) {
-    target.health = Math.max(0, target.health - 25);
+    const damage = effectActive("magic", "magicSword") ? 125 : 25;
+    target.health = Math.max(0, target.health - damage);
     if (target.health === 0) defeatEnemy(target);
     setStatus(target.alive ? `${target.name}: ${target.health} health` : `${target.name} defeated`);
   } else {
@@ -1930,12 +2440,29 @@ function toggleCrouch(moving) {
   }
 }
 
+function restoreBrowserCursor() {
+  try {
+    if (document.pointerLockElement && document.exitPointerLock) document.exitPointerLock();
+  } catch {
+    // Cursor styling must still be restored if the browser rejects an unlock request.
+  }
+  document.documentElement.classList.remove("pointer-locked");
+  document.body.style.cursor = "default";
+  app.canvas.style.cursor = "crosshair";
+}
+
 window.addEventListener("resize", () => {
   state.width = window.innerWidth;
   state.height = window.innerHeight;
 });
 
 window.addEventListener("keydown", (event) => {
+  if (event.code === "Escape") {
+    restoreBrowserCursor();
+    state.keys.clear();
+    if (!hud.itemMenu.classList.contains("hidden")) closeItemMenu();
+  }
+  if (event.ctrlKey && event.code === "KeyW") event.preventDefault();
   if (isTutorial && hud.skipConfirm && !hud.skipConfirm.classList.contains("hidden")) {
     event.preventDefault();
     if (event.code === "Escape") hud.skipConfirm.classList.add("hidden");
@@ -1998,6 +2525,7 @@ window.addEventListener("keydown", (event) => {
   }
   if (event.code === "ControlLeft") {
     event.preventDefault();
+    if (event.repeat) return;
     if (!tutorialActionUnlocked("stance")) {
       setStatus("Complete the current lesson");
       return;
@@ -2026,9 +2554,11 @@ window.addEventListener("keydown", (event) => {
       setStatus("Complete the current lesson");
       return;
     }
-    hud.itemMenu.classList.toggle("hidden");
-    setStatus(hud.itemMenu.classList.contains("hidden") ? "World mode" : "Choose 1-4");
-    if (isTutorial && state.tutorial.step === tutorialStep.items && !hud.itemMenu.classList.contains("hidden")) completeTutorialStep(tutorialStep.items);
+    const opening = hud.itemMenu.classList.contains("hidden");
+    if (opening) showItemMenu("items");
+    else closeItemMenu();
+    setStatus(opening ? "Choose item 1-4" : "World mode");
+    if (isTutorial && state.tutorial.step === tutorialStep.items && opening) completeTutorialStep(tutorialStep.items);
     return;
   }
   if (event.code === "KeyF") {
@@ -2065,9 +2595,24 @@ window.addEventListener("keydown", (event) => {
 
 window.addEventListener("keyup", (event) => state.keys.delete(event.code));
 
-app.canvas.addEventListener("click", () => {
-  if (document.pointerLockElement !== app.canvas) app.canvas.requestPointerLock();
+document.addEventListener("pointerlockchange", () => {
+  if (!document.pointerLockElement) restoreBrowserCursor();
 });
+document.addEventListener("pointerlockerror", restoreBrowserCursor);
+window.addEventListener("blur", () => {
+  state.keys.clear();
+  restoreBrowserCursor();
+});
+window.addEventListener("focus", restoreBrowserCursor);
+window.addEventListener("pageshow", restoreBrowserCursor);
+window.addEventListener("pagehide", restoreBrowserCursor);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible") {
+    state.keys.clear();
+    restoreBrowserCursor();
+  }
+});
+restoreBrowserCursor();
 
 app.canvas.addEventListener("mousedown", (event) => {
   if (event.button === 0) {
@@ -2082,17 +2627,13 @@ app.canvas.addEventListener("mousedown", (event) => {
 app.canvas.addEventListener("contextmenu", (event) => event.preventDefault());
 
 window.addEventListener("mousemove", (event) => {
-  if (document.pointerLockElement === app.canvas) {
-    state.yaw += event.movementX * 0.006;
-    state.pitch = clamp(state.pitch + event.movementY * 0.0035, minPitch, maxPitch);
-  } else {
-    state.yaw += clamp((event.clientX - state.width / 2) / (state.width / 2), -1, 1) * 0.0008;
-    state.pitch = clamp(state.pitch - clamp((state.height / 2 - event.clientY) / (state.height / 2), -1, 1) * 0.00035, minPitch, maxPitch);
-  }
+  state.yaw += event.movementX * 0.006;
+  state.pitch = clamp(state.pitch + event.movementY * 0.0035, minPitch, maxPitch);
   state.projectionY = Math.sin(state.pitch);
 });
 
 refreshInventory();
+refreshEffectsHud();
 refreshTutorialHud();
 preloadDestination(isTutorial ? "level1.html" : levelId === 1 ? "level0.html" : null);
 let lastTime = performance.now();
