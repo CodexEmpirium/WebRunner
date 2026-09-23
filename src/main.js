@@ -19,6 +19,8 @@ const levelOnePlanScale = 2;
 const itemPickupRadius = meter * 2;
 const waterBasinInset = meter * 0.5;
 const waterBasinDepth = meter * 0.5;
+const waterSurfaceElevation = 0.5;
+const waterWadingClearance = meter * 0.1;
 const waterFlowSpeed = 0.008 * 1.2;
 const columnRadius = meter * 0.5;
 const playerCollisionRadius = 16;
@@ -235,8 +237,12 @@ const levels = {
       { x: 380, y: -655 }
     ],
     enemies: [
-      { x: -82, y: -690, phase: 0.08 },
-      { x: 92, y: -505, phase: 0.58 }
+      { x: -165, y: 360, phase: 0.18 },
+      { x: 165, y: 360, phase: 0.68 },
+      { x: 0, y: -100, phase: 0.38 },
+      { x: -82, y: -690, phase: 0.08, activation: "corridorHalfway" },
+      { x: 92, y: -505, phase: 0.58, activation: "corridorHalfway" },
+      { x: 20, y: -430, phase: 0.84, activation: "corridorHalfway" }
     ]
   }
 };
@@ -323,6 +329,9 @@ function validateDungeonFineGeometry(levelPlan) {
     assertDetail(!pointInRect(column.x, column.y, stairBounds, columnRadius), "column footprint must not intersect the stairs");
     assertDetail(!levelPlan.waterPools.some((pool) => pointInRect(column.x, column.y, pool, columnRadius)), "column footprint must remain on solid ground");
   }
+  const delayedSlimes = levelPlan.enemies.filter((enemy) => enemy.activation === "corridorHalfway");
+  assertDetail(delayedSlimes.length === 3, "second chamber must contain three corridor-gated slimes");
+  assertDetail(delayedSlimes.every((enemy) => pointInRect(enemy.x, enemy.y, levelPlan.bounds.find((rect) => rect.name === "pool"))), "corridor-gated slimes must start in the second chamber");
 }
 
 function validateOrthogonalGeometryViews() {
@@ -371,6 +380,8 @@ state.enemies = (level.enemies || []).map((enemy, index) => ({
   contactDamage: 10,
   jumpClock: enemy.phase * 1.7,
   cycleDuration: 1.7,
+  activation: enemy.activation || null,
+  active: !enemy.activation,
   alive: true,
   deathTime: 0,
   removed: false,
@@ -878,6 +889,19 @@ function rectWorld(rect, fill, stroke = 0x080605, alpha = 1) {
   ], fill, stroke, 3, alpha);
 }
 
+function outlineWorldRect(rect, stroke, width = 3, alpha = 1, target = g) {
+  const z = waterSurfaceElevation + 0.2;
+  const corners = [
+    worldToScreen(rect.x, rect.y, z),
+    worldToScreen(rect.x + rect.w, rect.y, z),
+    worldToScreen(rect.x + rect.w, rect.y + rect.h, z),
+    worldToScreen(rect.x, rect.y + rect.h, z)
+  ];
+  for (let index = 0; index < corners.length; index += 1) {
+    line(corners[index], corners[(index + 1) % corners.length], stroke, width, alpha, target);
+  }
+}
+
 function poly(points, fill, stroke = null, lineWidth = 1, alpha = 1, target = g) {
   target.poly(points.flatMap((point) => [point.x, point.y])).fill({ color: fill, alpha });
   if (stroke !== null) {
@@ -892,6 +916,11 @@ function centeredRect(x, y, w, h, fill, stroke = null, target = g) {
 
 function line(a, b, stroke, width = 2, alpha = 1, target = g) {
   target.moveTo(a.x, a.y).lineTo(b.x, b.y).stroke({ color: stroke, width, alpha });
+}
+
+function strokedArc(target, x, y, radius, start, end, stroke, width = 2, alpha = 1) {
+  target.moveTo(x + Math.cos(start) * radius, y + Math.sin(start) * radius);
+  target.arc(x, y, radius, start, end).stroke({ color: stroke, width, alpha });
 }
 
 function tileCorners(tx, ty) {
@@ -952,7 +981,7 @@ function drawWaterPool(pool, index) {
     waterSprites[index] = sprite;
     waterLayer.addChild(sprite);
   }
-  projectedSprite(sprite, pool, 0.5, art.water);
+  projectedSprite(sprite, pool, waterSurfaceElevation, art.water);
   sprite.tilePosition.y = -(performance.now() * waterFlowSpeed % art.water.height);
   sprite.alpha = 0.82;
   sprite.tint = 0xbad6cf;
@@ -968,11 +997,14 @@ function waterBasinRect(pool) {
 }
 
 function playerInDeepWater() {
-  return level.kind === "dungeon" && level.waterPools.some((pool) => pointInRect(
-    state.player.x,
-    state.player.y,
-    waterBasinRect(pool)
-  ));
+  const playerFeetElevation = state.player.floorZ + state.player.z;
+  return level.kind === "dungeon"
+    && playerFeetElevation <= waterSurfaceElevation + waterWadingClearance
+    && level.waterPools.some((pool) => pointInRect(
+      state.player.x,
+      state.player.y,
+      waterBasinRect(pool)
+    ));
 }
 
 function objectSprite(key, texture, foreground = false) {
@@ -1103,10 +1135,12 @@ function drawDungeonFloor() {
     rectWorld(rect, 0x000000, 0x080605, 0);
   }
   level.waterPools.forEach((pool, index) => {
+    const basin = waterBasinRect(pool);
     drawWaterPool(pool, index);
     rectWorld(pool, 0x153d43, 0x9ab1a8, 0.08);
-    rectWorld(waterBasinRect(pool), 0x343a3b, 0x667174, 0.5);
+    rectWorld(basin, 0x343a3b, null, 0.5);
     rectWorld({ x: pool.x + 7, y: pool.y + 7, w: pool.w - 14, h: pool.h - 14 }, 0x2b7276, null, 0.06);
+    outlineWorldRect(basin, 0x8eb4b1, 4.5, 0.82);
   });
   drawWalls();
   drawSceneObjects();
@@ -1129,6 +1163,7 @@ function drawWalls(target = g, foregroundOnly = false) {
     if (!visible) continue;
     const midpointY = (y1 + y2) / 2;
     const wallHeight = midpointY <= s(-340) ? elevatedChamberWallHeight : midpointY < s(140) ? 98 : 80;
+    const textureOffset = Math.hypot(visible.x1 - x1, visible.y1 - y1);
     drawWallSegment(
       visible.x1,
       visible.y1,
@@ -1139,7 +1174,10 @@ function drawWalls(target = g, foregroundOnly = false) {
       target,
       0,
       true,
-      `wall:${x1}:${y1}:${x2}:${y2}:${wallHeight}`
+      `wall:${x1}:${y1}:${x2}:${y2}:${wallHeight}`,
+      textureOffset,
+      visible.clippedStart,
+      visible.clippedEnd
     );
   }
   drawElevatedDoorwayWall(target, foregroundOnly);
@@ -1150,14 +1188,14 @@ function clipSegmentInFront(x1, y1, x2, y2, margin = 8) {
   const depth1 = cameraDepth(x1, y1) - margin;
   const depth2 = cameraDepth(x2, y2) - margin;
   if (depth1 <= 0 && depth2 <= 0) return null;
-  if (depth1 > 0 && depth2 > 0) return { x1, y1, x2, y2 };
+  if (depth1 > 0 && depth2 > 0) return { x1, y1, x2, y2, clippedStart: false, clippedEnd: false };
 
   const ratio = depth1 / (depth1 - depth2);
   const cutX = x1 + (x2 - x1) * ratio;
   const cutY = y1 + (y2 - y1) * ratio;
   return depth1 > 0
-    ? { x1, y1, x2: cutX, y2: cutY }
-    : { x1: cutX, y1: cutY, x2, y2 };
+    ? { x1, y1, x2: cutX, y2: cutY, clippedStart: false, clippedEnd: true }
+    : { x1: cutX, y1: cutY, x2, y2, clippedStart: true, clippedEnd: false };
 }
 
 function drawWaterTunnels(target = g, foregroundOnly = false) {
@@ -1175,35 +1213,64 @@ function drawWaterTunnels(target = g, foregroundOnly = false) {
     const bottomRight = worldToScreen(x2, y, 0);
     const topRight = worldToScreen(x2, y, tunnelHeight);
     const topLeft = worldToScreen(x1, y, tunnelHeight);
-    poly([bottomLeft, bottomRight, topRight, topLeft], 0x020607, 0x172526, 3, 0.96, target);
-    line(
-      worldToScreen(x1 + 8, y - 0.2, 10),
-      worldToScreen(x2 - 8, y - 0.2, 10),
-      0x32666a,
-      2,
-      0.72,
-      target
-    );
+    poly([bottomLeft, bottomRight, topRight, topLeft], 0x020607, null, 1, 0.96, target);
+    line(bottomLeft, bottomRight, 0x172526, 3, 1, target);
+    line(topLeft, topRight, 0x172526, 3, 1, target);
+    if (!visible.clippedStart) line(bottomLeft, topLeft, 0x172526, 3, 1, target);
+    if (!visible.clippedEnd) line(bottomRight, topRight, 0x172526, 3, 1, target);
+    if (x2 - x1 > 16) {
+      line(
+        worldToScreen(x1 + 8, y - 0.2, 10),
+        worldToScreen(x2 - 8, y - 0.2, 10),
+        0x32666a,
+        2,
+        0.72,
+        target
+      );
+    }
   }
 }
 
-function drawWallSegment(x1, y1, x2, y2, fill, wallHeight, target = g, baseZ = 0, finishTop = true, textureKey = null) {
+function drawWallSegment(
+  x1,
+  y1,
+  x2,
+  y2,
+  fill,
+  wallHeight,
+  target = g,
+  baseZ = 0,
+  finishTop = true,
+  textureKey = null,
+  textureOffset = 0,
+  clippedStart = false,
+  clippedEnd = false
+) {
   const h = wallHeight * state.zoom;
   const a = worldToScreen(x1, y1, baseZ);
   const b = worldToScreen(x2, y2, baseZ);
   const face = [{ x: a.x, y: a.y }, { x: b.x, y: b.y }, { x: b.x, y: b.y - h }, { x: a.x, y: a.y - h }];
-  drawWallTextureSprite(x1, y1, x2, y2, wallHeight, baseZ, target === occlusionLayer, textureKey);
-  target.poly(face.flatMap((point) => [point.x, point.y])).fill({ color: fill, alpha: 0.34 }).stroke({ color: 0x050403, width: 3 });
+  drawWallTextureSprite(x1, y1, x2, y2, wallHeight, baseZ, target === occlusionLayer, textureKey, textureOffset);
+  target.poly(face.flatMap((point) => [point.x, point.y])).fill({ color: fill, alpha: 0.34 });
+  line(face[0], face[1], 0x050403, 3, 1, target);
+  line(face[3], face[2], 0x050403, 3, 1, target);
+  if (!clippedStart) line(face[0], face[3], 0x050403, 3, 1, target);
+  if (!clippedEnd) line(face[1], face[2], 0x050403, 3, 1, target);
   if (finishTop) {
     const dx = b.x - a.x;
     const dy = b.y - a.y;
     const length = Math.hypot(dx, dy) || 1;
     const lipX = -dy / length * 9;
     const lipY = dx / length * 9;
-    poly([
+    const lip = [
       { x: a.x, y: a.y - h }, { x: b.x, y: b.y - h },
       { x: b.x + lipX, y: b.y - h + lipY }, { x: a.x + lipX, y: a.y - h + lipY }
-    ], 0x4b443b, 0x100d0a, 2, 1, target);
+    ];
+    poly(lip, 0x4b443b, null, 1, 1, target);
+    line(lip[0], lip[1], 0x100d0a, 2, 1, target);
+    line(lip[3], lip[2], 0x100d0a, 2, 1, target);
+    if (!clippedStart) line(lip[0], lip[3], 0x100d0a, 2, 1, target);
+    if (!clippedEnd) line(lip[1], lip[2], 0x100d0a, 2, 1, target);
     const fadeHeight = Math.max(4, h * 0.05);
     const fadeSteps = 5;
     for (let i = 0; i < fadeSteps; i += 1) {
@@ -1219,7 +1286,7 @@ function drawWallSegment(x1, y1, x2, y2, fill, wallHeight, target = g, baseZ = 0
   }
 }
 
-function drawWallTextureSprite(x1, y1, x2, y2, wallHeight, baseZ, foreground, textureKey = null) {
+function drawWallTextureSprite(x1, y1, x2, y2, wallHeight, baseZ, foreground, textureKey = null, textureOffset = 0) {
   const sprites = foreground ? occlusionWallTextureSprites : wallTextureSprites;
   const layer = foreground ? occlusionWallTextureLayer : wallTextureLayer;
   const key = textureKey || `${x1}:${y1}:${x2}:${y2}:${wallHeight}:${baseZ}`;
@@ -1240,6 +1307,7 @@ function drawWallTextureSprite(x1, y1, x2, y2, wallHeight, baseZ, foreground, te
   sprite.height = wallHeight;
   sprite.alpha = 0.96;
   sprite.tint = 0xc9b99f;
+  sprite.tilePosition.set(-textureOffset, 0);
   sprite.setFromMatrix(new Matrix(
     (b.x - a.x) / segmentLength,
     (b.y - a.y) / segmentLength,
@@ -1256,8 +1324,9 @@ function drawElevatedDoorwayWall(target = g, foregroundOnly = false) {
   const y = level.exit.y;
   const visible = foregroundOnly ? clipSegmentInFront(x1, y, x2, y) : { x1, y1: y, x2, y2: y };
   if (!visible) return;
+  const textureOffset = Math.hypot(visible.x1 - x1, visible.y1 - y);
 
-  drawWallSegment(visible.x1, visible.y1, visible.x2, visible.y2, 0x2d261e, level.platformHeight, target, 0, false, `door-base:${x1}:${x2}`);
+  drawWallSegment(visible.x1, visible.y1, visible.x2, visible.y2, 0x2d261e, level.platformHeight, target, 0, false, `door-base:${x1}:${x2}`, textureOffset, visible.clippedStart, visible.clippedEnd);
   const headerBase = level.platformHeight + elevatedExitHeight;
   drawWallSegment(
     visible.x1,
@@ -1269,7 +1338,10 @@ function drawElevatedDoorwayWall(target = g, foregroundOnly = false) {
     target,
     headerBase,
     true,
-    `door-header:${x1}:${x2}`
+    `door-header:${x1}:${x2}`,
+    textureOffset,
+    visible.clippedStart,
+    visible.clippedEnd
   );
 }
 
@@ -1685,10 +1757,11 @@ function drawCharacter() {
   actorFx.clear();
   const baseX = state.width / 2;
   const baseY = state.height / 2 + 18;
+  const inDeepWater = playerInDeepWater();
   actorLayer.zIndex = baseY;
   const shadowScale = 1 - clamp(player.z / 240, 0, 0.48);
   actorShadow.ellipse(baseX + 4, baseY + 2, 34 * shadowScale * state.zoom, 12 * shadowScale * state.zoom)
-    .fill({ color: 0x000000, alpha: 0.52 });
+    .fill({ color: inDeepWater ? 0x092e34 : 0x000000, alpha: inDeepWater ? 0.16 : 0.52 });
 
   actorSprite.texture = sheet[row][column];
   const rolling = player.rollTime > 0;
@@ -1738,10 +1811,8 @@ function drawCharacter() {
         .lineTo(hoodX + hoodRadius, hoodY + hoodRadius * 0.35)
         .fill(0x241915);
     } else {
-      actorFx.arc(hoodX, hoodY, hoodRadius, Math.PI * 0.88, Math.PI * 2.12)
-        .stroke({ color: 0x1a1512, width: 8 * state.zoom });
-      actorFx.arc(hoodX, hoodY, hoodRadius + 2 * state.zoom, Math.PI * 0.9, Math.PI * 2.1)
-        .stroke({ color: 0x080706, width: 2 * state.zoom, alpha: 0.9 });
+      strokedArc(actorFx, hoodX, hoodY, hoodRadius, Math.PI * 0.88, Math.PI * 2.12, 0x1a1512, 8 * state.zoom);
+      strokedArc(actorFx, hoodX, hoodY, hoodRadius + 2 * state.zoom, Math.PI * 0.9, Math.PI * 2.1, 0x080706, 2 * state.zoom, 0.9);
     }
   }
 
@@ -1755,10 +1826,8 @@ function drawCharacter() {
     const centerX = baseX + attackDirection.x * 10 * state.zoom;
     const centerY = baseY - 46 - player.z + attackDirection.y * 10 * state.zoom;
     const magicSword = effectActive("magic", "magicSword");
-    actorFx.arc(centerX, centerY, 62 * state.zoom, start, end)
-      .stroke({ color: magicSword ? 0x66d9ff : 0xf3d69a, width: (magicSword ? 8 : 5) * state.zoom, alpha: magicSword ? 0.62 : 0.42 });
-    actorFx.arc(centerX, centerY, 69 * state.zoom, start + 0.12, end - 0.12)
-      .stroke({ color: magicSword ? 0xdaf8ff : 0xffffff, width: 1.5 * state.zoom, alpha: 0.82 });
+    strokedArc(actorFx, centerX, centerY, 62 * state.zoom, start, end, magicSword ? 0x66d9ff : 0xf3d69a, (magicSword ? 8 : 5) * state.zoom, magicSword ? 0.62 : 0.42);
+    strokedArc(actorFx, centerX, centerY, 69 * state.zoom, start + 0.12, end - 0.12, magicSword ? 0xdaf8ff : 0xffffff, 1.5 * state.zoom, 0.82);
   }
 
   if (effectActive("magic", "magicSword")) {
@@ -1783,17 +1852,44 @@ function drawCharacter() {
     }
   }
 
-  if (playerInDeepWater()) {
-    const surfaceY = baseY - 21 * state.zoom;
-    const lowerY = baseY + 9 * state.zoom;
-    const ripple = Math.sin(performance.now() * 0.004) * 1.8 * state.zoom;
-    actorFx.ellipse(baseX, (surfaceY + lowerY) / 2, 38 * state.zoom, 22 * state.zoom)
-      .fill({ color: 0x174f54, alpha: 0.36 });
-    actorFx.ellipse(baseX, surfaceY + ripple, 37 * state.zoom, 7 * state.zoom)
-      .fill({ color: 0x3d8589, alpha: 0.2 })
-      .stroke({ color: 0x8eb4b1, width: 1.2 * state.zoom, alpha: 0.34 });
-    actorFx.arc(baseX, surfaceY + 2 * state.zoom + ripple, 26 * state.zoom, 0.1, Math.PI - 0.1)
-      .stroke({ color: 0xa7c8c2, width: 1 * state.zoom, alpha: 0.24 });
+  if (inDeepWater) {
+    const stanceDepth = player.stance === "stand" ? 33 : player.stance === "crouch" ? 22 : 12;
+    const surfaceY = baseY - stanceDepth * state.zoom;
+    const lowerY = baseY + 12 * state.zoom;
+    const time = performance.now();
+    const ripple = Math.sin(time * 0.004) * 1.6 * state.zoom;
+    const movingWake = moving ? 1 : 0;
+    const direction = groundDirection(player.heading);
+
+    actorFx.roundRect(
+      baseX - 34 * state.zoom,
+      surfaceY,
+      68 * state.zoom,
+      lowerY - surfaceY,
+      12 * state.zoom
+    ).fill({ color: 0x18575d, alpha: 0.3 });
+    actorFx.ellipse(baseX, surfaceY + ripple, 42 * state.zoom, 8 * state.zoom)
+      .fill({ color: 0x4b9296, alpha: 0.16 })
+      .stroke({ color: 0xa8cbc7, width: 1.3 * state.zoom, alpha: 0.4 });
+    strokedArc(actorFx, baseX, surfaceY + 2 * state.zoom + ripple, 28 * state.zoom, 0.12, Math.PI - 0.12, 0xc1d9d4, 1.1 * state.zoom, 0.3);
+
+    if (movingWake) {
+      const wakeX = baseX - direction.x * 20 * state.zoom;
+      const wakeY = surfaceY - direction.y * 8 * state.zoom;
+      const wakePulse = (time * 0.018) % 1;
+      for (let i = 0; i < 2; i += 1) {
+        const spread = (wakePulse + i * 0.5) % 1;
+        actorFx.ellipse(
+          wakeX - direction.x * spread * 18 * state.zoom,
+          wakeY - direction.y * spread * 8 * state.zoom,
+          (18 + spread * 26) * state.zoom,
+          (4 + spread * 4) * state.zoom
+        ).stroke({ color: 0xb7d7d2, width: 1 * state.zoom, alpha: 0.25 * (1 - spread) });
+      }
+      const splashPhase = Math.sin(player.stride * 2);
+      actorFx.circle(baseX + splashPhase * 12 * state.zoom, surfaceY - 2 * state.zoom, 2.1 * state.zoom)
+        .fill({ color: 0xd1e5e0, alpha: 0.38 });
+    }
   }
 
 }
@@ -1943,6 +2039,12 @@ function defeatEnemy(enemy) {
   return true;
 }
 
+function secondChamberEncounterTriggered() {
+  if (level.kind !== "dungeon") return false;
+  const corridor = level.bounds.find((rect) => rect.name === "corridor");
+  return corridor && state.player.y < corridor.y + corridor.h / 2;
+}
+
 function damagePlayer(amount, source) {
   const player = state.player;
   if (effectActive("magic", "magicField")) {
@@ -1970,10 +2072,25 @@ function updateEnemies(delta) {
       }
       continue;
     }
+    if (!enemy.active && enemy.activation === "corridorHalfway" && secondChamberEncounterTriggered()) {
+      enemy.active = true;
+      enemy.originX = enemy.x;
+      enemy.originY = enemy.y;
+      enemy.targetX = enemy.x;
+      enemy.targetY = enemy.y;
+      enemy.jumpClock = 0;
+    }
     enemy.jumpClock += delta;
     if (enemy.jumpClock >= enemy.cycleDuration) {
       enemy.jumpClock %= enemy.cycleDuration;
-      chooseSlimeLanding(enemy);
+      if (enemy.active) {
+        chooseSlimeLanding(enemy);
+      } else {
+        enemy.originX = enemy.x;
+        enemy.originY = enemy.y;
+        enemy.targetX = enemy.x;
+        enemy.targetY = enemy.y;
+      }
     }
     const t = enemy.jumpClock / enemy.cycleDuration;
     if (t >= 0.25 && t <= 0.88) {
