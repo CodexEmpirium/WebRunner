@@ -25,6 +25,11 @@ const waterFlowSpeed = 0.008 * 1.2;
 const columnRadius = meter * 0.5;
 const playerCollisionRadius = 16;
 const floorRenderRadius = 11.2;
+const ledgeGrabReach = meter * 0.48;
+const ledgeVerticalReach = meter * 1.55;
+const ledgeShimmySpeed = meter * 1.35;
+const ledgeClimbDuration = 0.62;
+const ledgeHandAnchors = [0.26, 0.24, 0.22, 0.28, 0.22, 0.28, 0.25, 0.18];
 const minPitch = Math.PI / 9;
 const maxPitch = Math.PI * 7 / 18;
 const bombThrowDuration = 0.82;
@@ -38,6 +43,8 @@ if (geometryTestMode && geometryTestView && !(geometryTestView in geometryViewYa
   throw new Error(`Unknown geometry view: ${geometryTestView}`);
 }
 const progressStorageKey = "webrunner-progress-v1";
+const importedSaveStorageKey = "webrunner-imported-save-v1";
+const settingsStorageKey = "webrunner-settings-v1";
 const abilityGroups = {
   mana: {
     duration: 20,
@@ -54,6 +61,35 @@ const abilityGroups = {
     ]
   }
 };
+
+function readSettings() {
+  let stored = {};
+  try {
+    stored = JSON.parse(window.localStorage.getItem(settingsStorageKey) || "{}");
+  } catch {
+    stored = {};
+  }
+  const graphics = ["low", "medium", "high"].includes(stored.graphics) ? stored.graphics : "high";
+  const volume = Number(stored.volume);
+  return {
+    graphics,
+    volume: Number.isFinite(volume) ? clamp(volume, 0, 1) : 0.8
+  };
+}
+
+function readImportedSave() {
+  if (query.get("load") !== "1") return null;
+  try {
+    const snapshot = JSON.parse(window.sessionStorage.getItem(importedSaveStorageKey) || "null");
+    window.sessionStorage.removeItem(importedSaveStorageKey);
+    if (!snapshot || snapshot.version !== 1 || String(snapshot.level) !== levelKey) {
+      throw new Error("Saved game does not match this level.");
+    }
+    return snapshot;
+  } catch (error) {
+    throw new Error(`Unable to restore saved game: ${error.message}`);
+  }
+}
 
 function readProgress() {
   let stored = {};
@@ -86,6 +122,8 @@ function readProgress() {
 }
 
 const savedProgress = readProgress();
+const loadedGame = readImportedSave();
+const savedSettings = readSettings();
 
 const state = {
   width: window.innerWidth,
@@ -102,6 +140,9 @@ const state = {
   transitioning: false,
   transitionTarget: null,
   transitionDelay: 0,
+  paused: false,
+  pausePanel: "main",
+  settings: savedSettings,
   keys: new Set(),
   projectiles: [],
   explosions: [],
@@ -145,11 +186,14 @@ const state = {
     health: savedProgress.hp,
     maxHealth: 100,
     contactDamageCooldown: 0,
-    hitFlash: 0
+    hitFlash: 0,
+    ledge: null,
+    ledgeGrabCooldown: 0
   },
   tutorial: isTutorial ? {
     step: 0,
     advancing: false,
+    advanceTimer: 0,
     movementKeys: new Set(),
     sprintDistance: 0,
     jumpStarted: false,
@@ -411,17 +455,26 @@ const tutorialStep = {
   selectItem: 8,
   special: 9
 };
+if (loadedGame) restoreGameSnapshot(loadedGame);
 const hud = isAssetPreload ? null : buildHud(levelId);
+const levelMusic = document.getElementById("levelMusic");
+let resumeMusicAfterPause = false;
 const art = await loadArt();
 if (isAssetPreload) {
   window.parent.postMessage({ type: "webrunner-assets-ready", level: levelKey }, "*");
   return;
 }
 const app = new Application();
+const graphicsResolution = (quality) => quality === "low"
+  ? 0.75
+  : quality === "medium"
+    ? 1
+    : Math.min(window.devicePixelRatio || 1, 2);
 await app.init({
   resizeTo: window,
   background: "#050403",
-  antialias: true,
+  antialias: state.settings.graphics !== "low",
+  resolution: graphicsResolution(state.settings.graphics),
   preference: window.location.protocol === "file:" ? ["canvas"] : ["webgl", "canvas"]
 });
 document.getElementById("game").appendChild(app.canvas);
@@ -465,7 +518,7 @@ async function loadArt() {
     image.onerror = () => reject(new Error(`Unable to load artwork: ${path}`));
     image.src = new URL(path, window.location.href).href;
   });
-  const [runImage, runStealthImage, actionImage, lowImage, crawlImage, bombImage, bombWalkImage, bombCombatImage, slimeImage, slimeDeathImage, floorImage, wallImage, columnImage, coinImage, waterImage] = await Promise.all([
+  const [runImage, runStealthImage, actionImage, lowImage, crawlImage, bombImage, bombWalkImage, bombCombatImage, ledgeImage, slimeImage, slimeDeathImage, floorImage, wallImage, columnImage, coinImage, waterImage] = await Promise.all([
     loadImage("./assets/art/rogue-run-v3-clean.png"),
     loadImage("./assets/art/rogue-run-stealth-v2-clean.png"),
     loadImage("./assets/art/rogue-action-v2-clean.png"),
@@ -474,6 +527,7 @@ async function loadArt() {
     loadImage("./assets/art/rogue-bomb-v3-clean.png"),
     loadImage("./assets/art/rogue-bomb-walk-v1-clean.png"),
     loadImage("./assets/art/rogue-bomb-v2-clean.png"),
+    loadImage("./assets/art/rogue-ledge-v1-clean.png"),
     loadImage("./assets/art/enemy-dungeon-slime-clean.png"),
     loadImage("./assets/art/enemy-dungeon-slime-death-v1-clean.png"),
     loadImage("./assets/art/dungeon-floor.png"),
@@ -526,6 +580,7 @@ async function loadArt() {
     bomb: sliceSheet(bombImage, 7, 8),
     bombWalk: sliceSheet(bombWalkImage, 6, 8),
     bombCombat: sliceSheet(bombCombatImage, 3, 8),
+    ledge: sliceSheet(ledgeImage, 14, 8),
     slime: sliceSheet(slimeImage, 8, 8),
     slimeDeath: sliceSheet(slimeDeathImage, 4, 8),
     column: Texture.from(columnImage),
@@ -586,6 +641,43 @@ function buildHud(currentLevel) {
         </div>
       </section>
     </div>` : ""}
+    <div class="pause-overlay hidden" id="pauseOverlay">
+      <section class="pause-dialog" role="dialog" aria-modal="true" aria-labelledby="pauseTitle">
+        <div class="pause-panel" id="pauseMain">
+          <h2 class="pause-title" id="pauseTitle">Paused</h2>
+          <div class="pause-actions">
+            <button class="pause-button" id="pauseResume" type="button">Resume</button>
+            <button class="pause-button" id="pauseOptions" type="button">Options</button>
+            <button class="pause-button" id="pauseSave" type="button">Save Game</button>
+            <button class="pause-button pause-button-danger" id="pauseExit" type="button">Exit</button>
+          </div>
+          <p class="pause-save-status" id="pauseSaveStatus" role="status" aria-live="polite"></p>
+        </div>
+        <div class="pause-panel hidden" id="pauseOptionsPanel">
+          <h2 class="pause-subtitle">Options</h2>
+          <div class="pause-options">
+            <label class="pause-option">Graphics
+              <select id="graphicsQuality">
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+              </select>
+            </label>
+            <label class="pause-option">Audio
+              <input id="masterVolume" type="range" min="0" max="100" step="1">
+            </label>
+          </div>
+          <button class="pause-button" id="pauseOptionsBack" type="button">Back</button>
+        </div>
+        <div class="pause-panel hidden" id="pauseExitPanel">
+          <h2 class="pause-subtitle">Are you sure?</h2>
+          <div class="pause-actions">
+            <button class="pause-button pause-button-danger" id="confirmExit" type="button">Exit</button>
+            <button class="pause-button" id="cancelExit" type="button">Back</button>
+          </div>
+        </div>
+      </section>
+    </div>
     <div class="hint hint-left">
       <div class="keys">
         <div class="key key-up">&#9650;</div>
@@ -615,8 +707,48 @@ function buildHud(currentLevel) {
     healthCount: root.querySelector("#healthCount"),
     manaCount: root.querySelector("#manaCount"),
     magicCount: root.querySelector("#magicCount"),
-    bombCount: root.querySelector("#bombCount")
+    bombCount: root.querySelector("#bombCount"),
+    pauseOverlay: root.querySelector("#pauseOverlay"),
+    pauseMain: root.querySelector("#pauseMain"),
+    pauseOptionsPanel: root.querySelector("#pauseOptionsPanel"),
+    pauseExitPanel: root.querySelector("#pauseExitPanel"),
+    pauseResume: root.querySelector("#pauseResume"),
+    pauseOptions: root.querySelector("#pauseOptions"),
+    pauseSave: root.querySelector("#pauseSave"),
+    pauseExit: root.querySelector("#pauseExit"),
+    pauseSaveStatus: root.querySelector("#pauseSaveStatus"),
+    graphicsQuality: root.querySelector("#graphicsQuality"),
+    masterVolume: root.querySelector("#masterVolume"),
+    pauseOptionsBack: root.querySelector("#pauseOptionsBack"),
+    confirmExit: root.querySelector("#confirmExit"),
+    cancelExit: root.querySelector("#cancelExit")
   };
+
+  refs.graphicsQuality.value = state.settings.graphics;
+  refs.masterVolume.value = String(Math.round(state.settings.volume * 100));
+  refs.pauseResume.addEventListener("click", resumeGame);
+  refs.pauseOptions.addEventListener("click", () => showPausePanel("options"));
+  refs.pauseExit.addEventListener("click", () => showPausePanel("exit"));
+  refs.pauseOptionsBack.addEventListener("click", () => showPausePanel("main"));
+  refs.cancelExit.addEventListener("click", () => showPausePanel("main"));
+  refs.confirmExit.addEventListener("click", () => {
+    saveProgress();
+    window.location.href = "index.html";
+  });
+  refs.pauseSave.addEventListener("click", () => {
+    downloadSaveGame();
+    refs.pauseSaveStatus.textContent = "Game saved";
+  });
+  refs.graphicsQuality.addEventListener("change", () => {
+    state.settings.graphics = refs.graphicsQuality.value;
+    persistSettings();
+    applyGraphicsSettings();
+  });
+  refs.masterVolume.addEventListener("input", () => {
+    state.settings.volume = Number(refs.masterVolume.value) / 100;
+    persistSettings();
+    applyAudioSettings();
+  });
 
   refs.tutorialPanel = root.querySelector("#tutorialPanel");
   refs.tutorialCount = root.querySelector("#tutorialCount");
@@ -764,21 +896,26 @@ function refreshTutorialHud() {
 function completeTutorialStep(expectedStep) {
   if (!isTutorial || state.tutorial.step !== expectedStep || state.tutorial.advancing) return;
   state.tutorial.advancing = true;
+  state.tutorial.advanceTimer = 0.65;
   setStatus("Lesson complete");
   refreshTutorialHud();
-  window.setTimeout(() => {
-    if (expectedStep === tutorialSteps.length - 1) {
-      state.tutorial.portalActive = true;
-      state.tutorial.advancing = false;
-      closeItemMenu();
-      setStatus("Portal opened");
-    } else {
-      state.tutorial.step += 1;
-      state.tutorial.advancing = false;
-      setStatus(tutorialSteps[state.tutorial.step].title);
-    }
-    refreshTutorialHud();
-  }, 650);
+}
+
+function updateTutorialAdvance(delta) {
+  if (!state.tutorial?.advancing) return;
+  state.tutorial.advanceTimer = Math.max(0, state.tutorial.advanceTimer - delta);
+  if (state.tutorial.advanceTimer > 0) return;
+  if (state.tutorial.step === tutorialSteps.length - 1) {
+    state.tutorial.portalActive = true;
+    state.tutorial.advancing = false;
+    closeItemMenu();
+    setStatus("Portal opened");
+  } else {
+    state.tutorial.step += 1;
+    state.tutorial.advancing = false;
+    setStatus(tutorialSteps[state.tutorial.step].title);
+  }
+  refreshTutorialHud();
 }
 
 function gameProgress() {
@@ -795,6 +932,186 @@ function gameProgress() {
     magicAbility: state.effects.magic.id || "",
     magicTime: state.effects.magic.remaining.toFixed(2)
   };
+}
+
+function gameSnapshot() {
+  const tutorial = state.tutorial ? {
+    ...state.tutorial,
+    movementKeys: [...state.tutorial.movementKeys],
+    stanceActions: [...state.tutorial.stanceActions],
+    lowMovement: [...state.tutorial.lowMovement]
+  } : null;
+  return {
+    version: 1,
+    savedAt: new Date().toISOString(),
+    level: levelKey,
+    camera: { yaw: state.yaw, pitch: state.pitch, zoom: state.zoom },
+    player: { ...state.player, ledge: state.player.ledge ? { ...state.player.ledge } : null },
+    inventory: { ...state.inventory },
+    effects: {
+      mana: { ...state.effects.mana },
+      magic: { ...state.effects.magic }
+    },
+    collectibles: {
+      coins: level.coins.map((coin) => Boolean(coin.collected)),
+      potions: level.potions.map((potion) => Boolean(potion.collected))
+    },
+    enemies: state.enemies.map(({ visual, ...enemy }) => ({ ...enemy })),
+    projectiles: state.projectiles.map((projectile) => ({ ...projectile })),
+    explosions: state.explosions.map((explosion) => ({ ...explosion })),
+    scorches: state.scorches.map((scorch) => ({ ...scorch })),
+    tutorial
+  };
+}
+
+function restoreGameSnapshot(snapshot) {
+  const finite = (value, fallback) => Number.isFinite(Number(value)) ? Number(value) : fallback;
+  state.yaw = finite(snapshot.camera?.yaw, state.yaw);
+  state.pitch = clamp(finite(snapshot.camera?.pitch, state.pitch), minPitch, maxPitch);
+  state.projectionY = Math.sin(state.pitch);
+  state.zoom = finite(snapshot.camera?.zoom, state.zoom);
+
+  const playerFields = [
+    "x", "y", "heading", "speed", "stride", "z", "floorZ", "vz", "jumpAge", "jumpArm",
+    "grounded", "stance", "rollTime", "rollX", "rollY", "rollDirection", "attackTime",
+    "specialTime", "interactTime", "holdingBomb", "stealth", "bombThrowTime", "landTime",
+    "lastMoveX", "lastMoveY", "health", "maxHealth", "contactDamageCooldown", "hitFlash",
+    "ledgeGrabCooldown"
+  ];
+  for (const field of playerFields) {
+    if (snapshot.player && field in snapshot.player) state.player[field] = snapshot.player[field];
+  }
+  state.player.health = clamp(finite(state.player.health, 100), 0, state.player.maxHealth);
+  state.player.stance = ["stand", "crouch", "crawl"].includes(state.player.stance) ? state.player.stance : "stand";
+  state.player.ledge = snapshot.player?.ledge ? { ...snapshot.player.ledge } : null;
+
+  for (const key of Object.keys(state.inventory)) {
+    state.inventory[key] = Math.max(0, Math.floor(finite(snapshot.inventory?.[key], state.inventory[key])));
+  }
+  for (const group of Object.keys(state.effects)) {
+    const saved = snapshot.effects?.[group];
+    const valid = abilityGroups[group].options.some((option) => option.id === saved?.id);
+    state.effects[group].id = valid ? saved.id : null;
+    state.effects[group].remaining = valid ? clamp(finite(saved.remaining, 0), 0, abilityGroups[group].duration) : 0;
+  }
+
+  snapshot.collectibles?.coins?.forEach((collected, index) => {
+    if (level.coins[index]) level.coins[index].collected = Boolean(collected);
+  });
+  snapshot.collectibles?.potions?.forEach((collected, index) => {
+    if (level.potions[index]) level.potions[index].collected = Boolean(collected);
+  });
+  for (const savedEnemy of snapshot.enemies || []) {
+    const enemy = state.enemies.find((candidate) => candidate.id === savedEnemy.id);
+    if (!enemy) continue;
+    for (const field of ["x", "y", "originX", "originY", "targetX", "targetY", "heading", "z", "health", "maxHealth", "contactDamage", "jumpClock", "cycleDuration", "activation", "active", "alive", "deathTime", "removed"]) {
+      if (field in savedEnemy) enemy[field] = savedEnemy[field];
+    }
+  }
+  state.projectiles = Array.isArray(snapshot.projectiles) ? snapshot.projectiles.map((item) => ({ ...item })) : [];
+  state.explosions = Array.isArray(snapshot.explosions) ? snapshot.explosions.map((item) => ({ ...item })) : [];
+  state.scorches = Array.isArray(snapshot.scorches) ? snapshot.scorches.map((item) => ({ ...item })) : [];
+
+  if (state.tutorial && snapshot.tutorial) {
+    const savedTutorial = snapshot.tutorial;
+    for (const field of ["step", "advancing", "advanceTimer", "sprintDistance", "jumpStarted", "crouchJumpStarted", "portalActive", "portalPull", "portalDive", "portalDiveTime", "portalHidden"]) {
+      if (field in savedTutorial) state.tutorial[field] = savedTutorial[field];
+    }
+    state.tutorial.portal = { ...state.tutorial.portal, ...savedTutorial.portal };
+    state.tutorial.movementKeys = new Set(savedTutorial.movementKeys || []);
+    state.tutorial.stanceActions = new Set(savedTutorial.stanceActions || []);
+    state.tutorial.lowMovement = new Set(savedTutorial.lowMovement || []);
+  }
+}
+
+function downloadSaveGame() {
+  const payload = JSON.stringify(gameSnapshot()).replaceAll("]]>", "]]]]><![CDATA[>");
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<webrunnerSave version="1">\n  <state encoding="json"><![CDATA[${payload}]]></state>\n</webrunnerSave>\n`;
+  const blob = new Blob([xml], { type: "application/xml" });
+  const link = document.createElement("a");
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  link.href = URL.createObjectURL(blob);
+  link.download = `webrunner-${levelKey}-${timestamp}.xml`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(link.href), 0);
+}
+
+function persistSettings() {
+  try {
+    window.localStorage.setItem(settingsStorageKey, JSON.stringify(state.settings));
+  } catch {
+    // Settings remain active for the current session when storage is unavailable.
+  }
+}
+
+function applyGraphicsSettings() {
+  document.documentElement.dataset.graphics = state.settings.graphics;
+  const resolution = graphicsResolution(state.settings.graphics);
+  if (app.renderer.resolution !== resolution) {
+    app.renderer.resolution = resolution;
+    app.renderer.resize(window.innerWidth, window.innerHeight);
+  }
+}
+
+function applyAudioSettings() {
+  document.documentElement.style.setProperty("--master-volume", state.settings.volume);
+  document.querySelectorAll("audio").forEach((audio) => {
+    audio.volume = state.settings.volume;
+  });
+}
+
+function hasMusicSource(audio) {
+  return Boolean(audio?.currentSrc || audio?.getAttribute("src") || audio?.querySelector("source[src]"));
+}
+
+function startLevelMusic() {
+  if (!hasMusicSource(levelMusic) || state.paused) return;
+  levelMusic.volume = state.settings.volume;
+  levelMusic.play().then(() => {
+    window.removeEventListener("pointerdown", startLevelMusic);
+    window.removeEventListener("keydown", startLevelMusic);
+  }).catch(() => {
+    // A later interaction can retry if the browser blocks this attempt.
+  });
+}
+
+function showPausePanel(panel) {
+  state.pausePanel = panel;
+  hud.pauseMain.classList.toggle("hidden", panel !== "main");
+  hud.pauseOptionsPanel.classList.toggle("hidden", panel !== "options");
+  hud.pauseExitPanel.classList.toggle("hidden", panel !== "exit");
+  const focusTarget = panel === "options"
+    ? hud.graphicsQuality
+    : panel === "exit"
+      ? hud.cancelExit
+      : hud.pauseResume;
+  focusTarget.focus();
+}
+
+function pauseGame() {
+  if (state.paused || state.transitioning) return;
+  state.paused = true;
+  state.keys.clear();
+  closeItemMenu();
+  restoreBrowserCursor();
+  resumeMusicAfterPause = Boolean(levelMusic && !levelMusic.paused);
+  levelMusic?.pause();
+  hud.pauseSaveStatus.textContent = "";
+  hud.pauseOverlay.classList.remove("hidden");
+  showPausePanel("main");
+}
+
+function resumeGame() {
+  if (!state.paused) return;
+  state.paused = false;
+  state.keys.clear();
+  hud.pauseOverlay.classList.add("hidden");
+  lastTime = performance.now();
+  if (resumeMusicAfterPause || hasMusicSource(levelMusic)) startLevelMusic();
+  resumeMusicAfterPause = false;
+  app.canvas.focus();
 }
 
 function saveProgress() {
@@ -1064,6 +1381,174 @@ function columnBlocksMovement(x, y, worldZ) {
   return level.columns.some((column) => (
     Math.hypot(x - column.x, y - column.y) < columnRadius + playerCollisionRadius
   ));
+}
+
+function ledgeCandidates() {
+  if (level.kind !== "dungeon") return [];
+  const candidates = [];
+  const platform = level.upperPlatform;
+  const stair = stairGeometry(level);
+  const edgeY = platform.y + platform.h;
+  const minX = Math.max(platform.x, stair.x + stair.w) + playerCollisionRadius;
+  const maxX = platform.x + platform.w - playerCollisionRadius;
+  const edgeX = clamp(state.player.x, minX, maxX);
+  if (state.player.y >= edgeY - 2) {
+    const lowerZ = groundElevation(edgeX, edgeY + playerCollisionRadius + 4);
+    candidates.push({
+      kind: "walkway",
+      x: edgeX,
+      y: edgeY,
+      distance: Math.hypot(state.player.x - edgeX, state.player.y - edgeY),
+      topZ: level.platformHeight,
+      lowerZ,
+      normalX: 0,
+      normalY: 1,
+      tangentX: 1,
+      tangentY: 0,
+      along: edgeX - minX,
+      length: maxX - minX,
+      originX: minX,
+      originY: edgeY,
+      allowShimmy: maxX - minX > meter * 1.25,
+      climbX: edgeX,
+      climbY: edgeY - playerCollisionRadius - 4
+    });
+  }
+
+  for (const column of level.columns) {
+    const dx = state.player.x - column.x;
+    const dy = state.player.y - column.y;
+    const distanceFromCenter = Math.hypot(dx, dy) || 1;
+    if (distanceFromCenter < columnRadius - 2) continue;
+    const normalX = dx / distanceFromCenter;
+    const normalY = dy / distanceFromCenter;
+    const x = column.x + normalX * columnRadius;
+    const y = column.y + normalY * columnRadius;
+    const lowerZ = groundElevation(
+      column.x + normalX * (columnRadius + playerCollisionRadius + 4),
+      column.y + normalY * (columnRadius + playerCollisionRadius + 4)
+    );
+    candidates.push({
+      kind: "column",
+      x,
+      y,
+      distance: Math.abs(distanceFromCenter - columnRadius),
+      topZ: 70,
+      lowerZ,
+      normalX,
+      normalY,
+      tangentX: -normalY,
+      tangentY: normalX,
+      along: 0,
+      length: 0,
+      originX: x,
+      originY: y,
+      allowShimmy: false,
+      climbX: column.x,
+      climbY: column.y
+    });
+  }
+  return candidates;
+}
+
+function tryGrabLedge() {
+  const player = state.player;
+  if (player.grounded || player.ledge || player.ledgeGrabCooldown > 0 || player.rollTime > 0 || player.stance !== "stand") return false;
+  const feetZ = player.floorZ + player.z;
+  const candidate = ledgeCandidates()
+    .filter((ledge) => ledge.distance <= ledgeGrabReach && feetZ <= ledge.topZ + 10 && feetZ >= ledge.topZ - ledgeVerticalReach)
+    .sort((a, b) => a.distance - b.distance)[0];
+  if (!candidate) return false;
+
+  player.ledge = { ...candidate, mode: "hang", age: 0, motion: 0, motionTime: 0, climbTime: 0 };
+  player.x = candidate.x;
+  player.y = candidate.y;
+  player.floorZ = candidate.lowerZ;
+  player.z = Math.max(0, candidate.topZ - candidate.lowerZ);
+  player.vz = 0;
+  player.grounded = false;
+  player.heading = Math.atan2(-candidate.normalY, -candidate.normalX);
+  player.jumpAge = 0;
+  player.jumpArm = 0;
+  player.attackTime = 0;
+  player.specialTime = 0;
+  player.interactTime = 0;
+  if (!hud.itemMenu.classList.contains("hidden")) closeItemMenu();
+  setStatus(candidate.kind === "column" ? "Column ledge grabbed" : "Ledge grabbed");
+  return true;
+}
+
+function startLedgeClimb() {
+  const ledge = state.player.ledge;
+  if (!ledge || ledge.mode === "climb") return;
+  ledge.mode = "climb";
+  ledge.climbTime = 0;
+  ledge.motion = 0;
+  setStatus("Climb up");
+}
+
+function releaseLedge(jumpAway = false) {
+  const player = state.player;
+  const ledge = player.ledge;
+  if (!ledge) return;
+  player.x += ledge.normalX * (jumpAway ? 12 : 7);
+  player.y += ledge.normalY * (jumpAway ? 12 : 7);
+  player.floorZ = ledge.lowerZ;
+  player.z = Math.max(0, ledge.topZ - ledge.lowerZ - 6);
+  player.vz = jumpAway ? 250 : -80;
+  player.grounded = false;
+  player.ledge = null;
+  player.ledgeGrabCooldown = jumpAway ? 0.5 : 0.38;
+  setStatus(jumpAway ? "Ledge jump" : "Ledge released");
+}
+
+function updateLedge(delta) {
+  const player = state.player;
+  const ledge = player.ledge;
+  if (!ledge) return;
+  ledge.age += delta;
+  player.vz = 0;
+  player.floorZ = ledge.lowerZ;
+  player.z = Math.max(0, ledge.topZ - ledge.lowerZ);
+  player.heading = Math.atan2(-ledge.normalY, -ledge.normalX);
+
+  if (ledge.mode === "climb") {
+    ledge.climbTime += delta;
+    if (ledge.climbTime >= ledgeClimbDuration) {
+      player.x = ledge.climbX;
+      player.y = ledge.climbY;
+      player.floorZ = ledge.topZ;
+      player.z = 0;
+      player.vz = 0;
+      player.grounded = true;
+      player.ledge = null;
+      player.ledgeGrabCooldown = 0.28;
+      player.landTime = 0.12;
+      setStatus("Climbed up");
+    }
+    return;
+  }
+
+  if (state.keys.has("KeyW") || state.keys.has("ArrowUp")) {
+    startLedgeClimb();
+    return;
+  }
+
+  const lateral = (state.keys.has("KeyD") || state.keys.has("ArrowRight") ? 1 : 0)
+    - (state.keys.has("KeyA") || state.keys.has("ArrowLeft") ? 1 : 0);
+  ledge.motion = ledge.allowShimmy ? lateral : 0;
+  if (ledge.motion !== 0) {
+    ledge.motionTime += delta;
+    ledge.along = clamp(ledge.along + ledge.motion * ledgeShimmySpeed * delta, 0, ledge.length);
+    player.x = ledge.originX + ledge.tangentX * ledge.along;
+    player.y = ledge.originY + ledge.tangentY * ledge.along;
+    ledge.x = player.x;
+    ledge.y = player.y;
+    ledge.climbX = player.x - ledge.normalX * (playerCollisionRadius + 4);
+    ledge.climbY = player.y - ledge.normalY * (playerCollisionRadius + 4);
+  } else {
+    ledge.motionTime = 0;
+  }
 }
 
 function drawInfiniteFloor() {
@@ -1718,7 +2203,24 @@ function drawCharacter() {
   let column = 0;
   let sheet = art.action;
   const throwProgress = player.bombThrowTime > 0 ? 1 - player.bombThrowTime / bombThrowDuration : 0;
-  if (player.rollTime > 0) {
+  if (player.ledge) {
+    const ledge = player.ledge;
+    sheet = art.ledge;
+    row = (row + 4) % 8;
+    if (ledge.mode === "climb") {
+      column = 10 + Math.min(3, Math.floor(ledge.climbTime / ledgeClimbDuration * 4));
+    } else if (ledge.age < 0.2) {
+      column = Math.min(1, Math.floor(ledge.age / 0.1));
+    } else if (ledge.age < 0.34) {
+      column = 2;
+    } else if (ledge.motion < 0) {
+      column = 4 + Math.floor(ledge.motionTime * 9) % 3;
+    } else if (ledge.motion > 0) {
+      column = 7 + Math.floor(ledge.motionTime * 9) % 3;
+    } else {
+      column = 3;
+    }
+  } else if (player.rollTime > 0) {
     sheet = art.low;
     column = 3 + Math.floor((1 - player.rollTime / 0.55) * 3) % 3;
   } else if (player.bombThrowTime > 0) {
@@ -1765,8 +2267,8 @@ function drawCharacter() {
 
   actorSprite.texture = sheet[row][column];
   const rolling = player.rollTime > 0;
-  actorSprite.anchor.set(0.5, rolling ? 0.5 : player.stance === "crawl" ? 0.76 : player.stance === "crouch" ? 0.82 : 0.9);
-  const targetHeight = rolling ? 112 : player.stance === "crawl" ? 112 : player.stance === "crouch" ? 124 : 142;
+  actorSprite.anchor.set(0.5, player.ledge ? ledgeHandAnchors[row] : rolling ? 0.5 : player.stance === "crawl" ? 0.76 : player.stance === "crouch" ? 0.82 : 0.9);
+  const targetHeight = player.ledge ? 142 : rolling ? 112 : player.stance === "crawl" ? 112 : player.stance === "crouch" ? 124 : 142;
   let scale = targetHeight / actorSprite.texture.height * state.zoom;
   let poseX = 0;
   let poseY = 0;
@@ -1801,7 +2303,9 @@ function drawCharacter() {
   if (player.stealth && sheet !== art.runStealth && player.rollTime <= 0) {
     const hoodYFactor = player.stance === "crawl" ? 0.2 : player.stance === "crouch" ? 0.62 : 0.72;
     const hoodX = actorSprite.x;
-    const hoodY = actorSprite.y - targetHeight * state.zoom * hoodYFactor;
+    const hoodY = player.ledge
+      ? actorSprite.y + 25 * state.zoom
+      : actorSprite.y - targetHeight * state.zoom * hoodYFactor;
     const hoodRadius = (player.stance === "crawl" ? 12 : 17) * state.zoom;
     if (row >= 3 && row <= 5) {
       actorFx.ellipse(hoodX, hoodY, hoodRadius * 1.05, hoodRadius * 1.18)
@@ -2220,6 +2724,7 @@ function drawBombEffects() {
 }
 
 function update(delta) {
+  updateTutorialAdvance(delta);
   updateEffects(delta);
   let mx = 0;
   let my = 0;
@@ -2232,12 +2737,16 @@ function update(delta) {
   let moving = mx !== 0 || my !== 0;
   const sprinting = state.keys.has("ShiftLeft") || state.keys.has("ShiftRight");
   const tutorial = state.tutorial;
+  player.ledgeGrabCooldown = Math.max(0, player.ledgeGrabCooldown - delta);
 
-  if (tutorial?.portalActive && !tutorial.portalDive && Math.hypot(player.x - tutorial.portal.x, player.y - tutorial.portal.y) <= 1.25 * meter) {
+  if (!player.ledge && tutorial?.portalActive && !tutorial.portalDive && Math.hypot(player.x - tutorial.portal.x, player.y - tutorial.portal.y) <= 1.25 * meter) {
     tutorial.portalPull = true;
   }
 
-  if (tutorial?.portalPull && !tutorial.portalDive) {
+  if (player.ledge) {
+    updateLedge(delta);
+    moving = player.ledge?.motion !== 0;
+  } else if (tutorial?.portalPull && !tutorial.portalDive) {
     const dx = tutorial.portal.x - player.x;
     const dy = tutorial.portal.y - player.y;
     const distance = Math.hypot(dx, dy);
@@ -2297,7 +2806,8 @@ function update(delta) {
     player.heading = Math.atan2(worldMove.y, worldMove.x);
     player.rollTime = Math.max(0, player.rollTime - delta);
   }
-  if (!player.grounded) {
+  if (!player.ledge) tryGrabLedge();
+  if (!player.grounded && !player.ledge) {
     player.jumpAge += delta;
     player.vz -= 1380 * delta;
     player.z += player.vz * delta;
@@ -2325,7 +2835,7 @@ function update(delta) {
   player.landTime = Math.max(0, player.landTime - delta);
 
   if (level.kind === "dungeon") {
-    player.floorZ = groundElevation(player.x, player.y);
+    if (!player.ledge) player.floorZ = groundElevation(player.x, player.y);
     collectItems();
     if (!state.transitioning && player.floorZ >= level.platformHeight * 0.85 && pointInRect(player.x, player.y, level.exit, 10)) {
       startTransition("level0.html?fade=1");
@@ -2490,6 +3000,10 @@ function chooseItem(slot) {
 }
 
 function useWeapon() {
+  if (state.player.ledge) {
+    setStatus("Both hands are on the ledge");
+    return;
+  }
   state.player.attackTime = 0.28;
   const forwardX = Math.cos(state.player.heading);
   const forwardY = Math.sin(state.player.heading);
@@ -2517,6 +3031,10 @@ function useWeapon() {
 }
 
 function specialAction() {
+  if (state.player.ledge) {
+    setStatus("Both hands are on the ledge");
+    return;
+  }
   if (state.player.holdingBomb) {
     const heading = state.player.heading;
     state.player.holdingBomb = false;
@@ -2574,15 +3092,24 @@ window.addEventListener("resize", () => {
 });
 
 window.addEventListener("keydown", (event) => {
-  if (event.code === "Escape") {
-    restoreBrowserCursor();
-    state.keys.clear();
-    if (!hud.itemMenu.classList.contains("hidden")) closeItemMenu();
-  }
   if (event.ctrlKey && event.code === "KeyW") event.preventDefault();
   if (isTutorial && hud.skipConfirm && !hud.skipConfirm.classList.contains("hidden")) {
     event.preventDefault();
     if (event.code === "Escape") hud.skipConfirm.classList.add("hidden");
+    return;
+  }
+  if (event.code === "Escape") {
+    event.preventDefault();
+    if (state.paused) {
+      if (state.pausePanel === "main") resumeGame();
+      else showPausePanel("main");
+    } else {
+      pauseGame();
+    }
+    return;
+  }
+  if (state.paused) {
+    event.preventDefault();
     return;
   }
   if (!hud.itemMenu.classList.contains("hidden") && ["Digit1", "Digit2", "Digit3", "Digit4"].includes(event.code)) {
@@ -2596,6 +3123,10 @@ window.addEventListener("keydown", (event) => {
   }
   if (event.code === "Space") {
     event.preventDefault();
+    if (state.player.ledge) {
+      if (!event.repeat) releaseLedge(true);
+      return;
+    }
     if (!tutorialActionUnlocked("jump")) {
       setStatus("Complete the current lesson");
       return;
@@ -2643,6 +3174,10 @@ window.addEventListener("keydown", (event) => {
   if (event.code === "ControlLeft") {
     event.preventDefault();
     if (event.repeat) return;
+    if (state.player.ledge) {
+      releaseLedge(false);
+      return;
+    }
     if (!tutorialActionUnlocked("stance")) {
       setStatus("Complete the current lesson");
       return;
@@ -2657,6 +3192,10 @@ window.addEventListener("keydown", (event) => {
   }
   if (event.code === "KeyQ" && !event.repeat) {
     event.preventDefault();
+    if (state.player.ledge) {
+      setStatus("Both hands are on the ledge");
+      return;
+    }
     if (isTutorial && !state.tutorial.portalActive) {
       setStatus("Complete training first");
       return;
@@ -2667,6 +3206,10 @@ window.addEventListener("keydown", (event) => {
   }
   if (event.code === "KeyE") {
     event.preventDefault();
+    if (state.player.ledge) {
+      setStatus("Both hands are on the ledge");
+      return;
+    }
     if (!tutorialActionUnlocked("items")) {
       setStatus("Complete the current lesson");
       return;
@@ -2680,6 +3223,10 @@ window.addEventListener("keydown", (event) => {
   }
   if (event.code === "KeyF") {
     event.preventDefault();
+    if (state.player.ledge) {
+      setStatus("Both hands are on the ledge");
+      return;
+    }
     if (isTutorial && !state.tutorial.portalActive) {
       setStatus("Complete training first");
       return;
@@ -2732,6 +3279,7 @@ document.addEventListener("visibilitychange", () => {
 restoreBrowserCursor();
 
 app.canvas.addEventListener("mousedown", (event) => {
+  if (state.paused) return;
   if (event.button === 0) {
     if (tutorialActionUnlocked("attack")) useWeapon();
     else setStatus("Complete the current lesson");
@@ -2744,6 +3292,7 @@ app.canvas.addEventListener("mousedown", (event) => {
 app.canvas.addEventListener("contextmenu", (event) => event.preventDefault());
 
 window.addEventListener("mousemove", (event) => {
+  if (state.paused) return;
   state.yaw += event.movementX * 0.006;
   state.pitch = clamp(state.pitch + event.movementY * 0.0035, minPitch, maxPitch);
   state.projectionY = Math.sin(state.pitch);
@@ -2752,21 +3301,27 @@ window.addEventListener("mousemove", (event) => {
 refreshInventory();
 refreshEffectsHud();
 refreshTutorialHud();
+applyGraphicsSettings();
+applyAudioSettings();
+window.addEventListener("pointerdown", startLevelMusic);
+window.addEventListener("keydown", startLevelMusic);
 preloadDestination(isTutorial ? "level1.html" : levelId === 1 ? "level0.html" : null);
 let lastTime = performance.now();
 app.ticker.add(() => {
   const now = performance.now();
   const delta = Math.min(0.05, (now - lastTime) / 1000);
   lastTime = now;
-  update(delta);
-  render();
+  if (!state.paused) {
+    update(delta);
+    render();
+  }
 });
 }
 
 main().catch((error) => {
-  console.error("WebRunner failed to start", error);
+  console.error("Dungeon Runner: Felicity's Call failed to start", error);
   const diagnostic = document.createElement("pre");
   diagnostic.className = "runtime-error";
-  diagnostic.textContent = `WebRunner failed to start\n${error.stack || error.message}`;
+  diagnostic.textContent = `Dungeon Runner: Felicity's Call failed to start\n${error.stack || error.message}`;
   document.body.appendChild(diagnostic);
 });

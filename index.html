@@ -3,12 +3,49 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>WebRunner - Tutorial</title>
+  <title>Dungeon Runner: Felicity's Call</title>
   <link rel="stylesheet" href="./styles/hud.css">
 </head>
-<body data-level="tutorial">
-  <div id="game"></div>
-  <script defer src="./vendor/pixi.min.js"></script>
-  <script defer src="./src/main.js"></script>
+<body class="main-menu-page">
+  <div class="main-menu-background" aria-hidden="true">
+    <video class="main-menu-video" id="menuBackgroundVideo" autoplay muted loop playsinline></video>
+    <div class="main-menu-background-placeholder" id="menuBackgroundPlaceholder"></div>
+  </div>
+  <audio id="titleMusic" data-music-slot="title" loop preload="none">
+    <!-- Add title-screen music sources here. -->
+  </audio>
+  <main class="main-menu-shell">
+    <section class="main-menu-panel" aria-labelledby="gameTitle">
+      <div class="main-menu-view" id="mainMenuPrimary">
+        <p class="main-menu-kicker">A Dungeon Rogue Adventure</p>
+        <h1 id="gameTitle">Dungeon Runner: <span class="game-subtitle">Felicity's Call</span></h1>
+        <div class="main-menu-actions">
+          <a class="menu-button" id="newGame" href="./tutorial.html">New Game</a>
+          <button class="menu-button" id="loadGame" type="button">Load Game</button>
+          <button class="menu-button" id="menuOptions" type="button">Options</button>
+          <input id="saveFile" type="file" accept=".xml,text/xml,application/xml" hidden>
+        </div>
+        <p class="main-menu-status" id="menuStatus" role="status" aria-live="polite"></p>
+      </div>
+      <div class="main-menu-view hidden" id="mainMenuOptions">
+        <h2 class="pause-subtitle">Options</h2>
+        <div class="pause-options">
+          <label class="pause-option">Graphics
+            <select id="menuGraphicsQuality">
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+            </select>
+          </label>
+          <label class="pause-option">Audio
+            <input id="menuMasterVolume" type="range" min="0" max="100" step="1">
+          </label>
+        </div>
+        <button class="menu-button" id="menuOptionsBack" type="button">Back</button>
+      </div>
+    </section>
+  </main>
+  <small class="main-menu-copyright">Copyright © CodexEmpirium. All rights reserved.</small>
+  <script defer src="./src/menu.js"></script>
 </body>
 </html>
