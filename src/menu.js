@@ -1,6 +1,7 @@
 (() => {
   const loadButton = document.getElementById("loadGame");
   const newGame = document.getElementById("newGame");
+  const tutorialGame = document.getElementById("tutorialGame");
   const fileInput = document.getElementById("saveFile");
   const status = document.getElementById("menuStatus");
   const optionsButton = document.getElementById("menuOptions");
@@ -15,6 +16,7 @@
   const importedSaveKey = "webrunner-imported-save-v1";
   const progressStorageKey = "webrunner-progress-v1";
   const settingsStorageKey = "webrunner-settings-v1";
+  const worldStateStorageKey = "webrunner-world-state-v1";
 
   function readSettings() {
     try {
@@ -80,20 +82,24 @@
     const stateNode = root.querySelector("state");
     if (!stateNode) throw new Error("The save file does not contain game state.");
     const snapshot = JSON.parse(stateNode.textContent);
-    if (!snapshot || snapshot.version !== 1 || !["tutorial", "0", "1"].includes(String(snapshot.level))) {
+    if (!snapshot || snapshot.version !== 1 || !["tutorial", "0", "1.1", "1.2"].includes(String(snapshot.level))) {
       throw new Error("The saved game state is incomplete.");
     }
     return snapshot;
   }
 
-  newGame.addEventListener("click", () => {
+  function clearRunState() {
     try {
       window.sessionStorage.removeItem(importedSaveKey);
       window.sessionStorage.removeItem(progressStorageKey);
+      window.sessionStorage.removeItem(worldStateStorageKey);
     } catch {
       // Navigation still starts a new game when session storage is unavailable.
     }
-  });
+  }
+
+  newGame.addEventListener("click", clearRunState);
+  tutorialGame?.addEventListener("click", clearRunState);
   optionsButton.addEventListener("click", () => showOptions(true));
   optionsBack.addEventListener("click", () => showOptions(false));
   graphicsQuality.addEventListener("change", () => {
@@ -118,8 +124,15 @@
     status.textContent = "Loading saved game...";
     try {
       const snapshot = readSave(await file.text());
+      window.sessionStorage.removeItem(worldStateStorageKey);
       window.sessionStorage.setItem(importedSaveKey, JSON.stringify(snapshot));
-      const target = snapshot.level === "tutorial" ? "tutorial.html" : `level${snapshot.level}.html`;
+      const target = snapshot.level === "tutorial"
+        ? "tutorial.html"
+        : snapshot.level === "1.1"
+          ? "level1.html"
+          : snapshot.level === "1.2"
+            ? "level1-2.html"
+            : `level${snapshot.level}.html`;
       window.location.href = `${target}?load=1&fade=1`;
     } catch (error) {
       fail(error.message || "Unable to load the selected save file.");

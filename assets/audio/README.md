@@ -5,7 +5,7 @@ The game currently defines four looping music slots:
 - `title` in `index.html`
 - `tutorial` in `tutorial.html`
 - `level-0` in `level0.html`
-- `level-1` in `level1.html`
+- `level-1.1` in `level1.html`, and `level-1.2` in `level1-2.html`
 
 Add one or more sources inside the matching `audio` element when a track is ready:
 

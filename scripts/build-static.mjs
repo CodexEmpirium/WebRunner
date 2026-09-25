@@ -7,7 +7,7 @@ const output = resolve(root, "dist");
 await rm(output, { recursive: true, force: true });
 await mkdir(output, { recursive: true });
 
-for (const file of ["index.html", "tutorial.html", "level0.html", "level1.html"]) {
+for (const file of ["index.html", "tutorial.html", "level0.html", "level1.html", "level1-2.html"]) {
   await cp(resolve(root, file), resolve(output, file));
 }
 

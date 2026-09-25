@@ -3,6 +3,8 @@ const { Application, Container, Graphics, Matrix, Rectangle, Sprite, Texture, Ti
 const levelKey = document.body.dataset.level || "1";
 const isTutorial = levelKey === "tutorial";
 const levelId = isTutorial ? null : Number(levelKey);
+const isLevelOneOne = levelKey === "1.1";
+const isLevelOneTwo = levelKey === "1.2";
 const query = new URLSearchParams(window.location.search);
 const isAssetPreload = query.get("preload") === "1";
 const geometryTestCoarse = query.has("geometryTestCoarse") && query.get("geometryTestCoarse") !== "0";
@@ -12,7 +14,7 @@ const geometryTestFocus = query.get("geometryFocus") || "door";
 const geometryTestView = query.get("geometryView")?.toLowerCase() || null;
 const geometryTestYaw = query.has("cameraYaw") ? Number(query.get("cameraYaw")) : Number.NaN;
 const geometryTestPitch = query.has("cameraPitch") ? Number(query.get("cameraPitch")) : Number.NaN;
-const availableLevels = [0, 1];
+const availableLevels = [0, "1.1", "1.2"];
 const meter = 48;
 const tile = 64;
 const levelOnePlanScale = 2;
@@ -22,21 +24,63 @@ const waterBasinDepth = meter * 0.5;
 const waterSurfaceElevation = 0.5;
 const waterWadingClearance = meter * 0.1;
 const waterFlowSpeed = 0.008 * 1.2;
+const torchVisibilityArc = Math.PI * 4 / 3;
 const columnRadius = meter * 0.5;
 const playerCollisionRadius = 16;
 const floorRenderRadius = 11.2;
+const defaultCameraZoom = 1.65;
+const extendedSightCameraZoom = 1;
+const platformCameraZoomScale = 0.85;
+const platformCameraZoom = 0.52 * platformCameraZoomScale;
+const platformTopElevation = 26;
+const platformDeathDepth = meter;
+const characterStandingHeight = meter * 1.6;
+const raisedPlatformThickness = 38;
+const raisedPlatformClearance = meter * 3;
 const ledgeGrabReach = meter * 0.48;
 const ledgeVerticalReach = meter * 1.55;
 const ledgeShimmySpeed = meter * 1.35;
 const ledgeClimbDuration = 0.62;
 const ledgeHandAnchors = [0.26, 0.24, 0.22, 0.28, 0.22, 0.28, 0.25, 0.18];
+const magicSwordBladeMaps = {
+  idle: [
+    [[0.38, 0.73], [0.34, 0.87]], [[0.37, 0.74], [0.31, 0.86]],
+    [[0.38, 0.61], [0.32, 0.82]], [[0.39, 0.55], [0.33, 0.76]],
+    [[0.39, 0.61], [0.34, 0.78]], [[0.58, 0.56], [0.67, 0.72]],
+    [[0.56, 0.57], [0.64, 0.73]], [[0.44, 0.72], [0.39, 0.88]]
+  ],
+  walk: [
+    [[0.36, 0.54], [0.24, 0.80]], [[0.28, 0.51], [0.08, 0.72]],
+    [[0.24, 0.48], [0.07, 0.55]], [[0.27, 0.49], [0.10, 0.60]],
+    [[0.78, 0.55], [0.85, 0.70]], [[0.78, 0.50], [0.94, 0.57]],
+    [[0.77, 0.54], [0.94, 0.68]], [[0.35, 0.56], [0.24, 0.80]]
+  ],
+  crouch: [
+    [[0.42, 0.69], [0.34, 0.86]], [[0.38, 0.57], [0.28, 0.71]],
+    [[0.37, 0.56], [0.27, 0.66]], [[0.38, 0.57], [0.25, 0.72]],
+    [[0.63, 0.59], [0.80, 0.71]], [[0.58, 0.58], [0.75, 0.70]],
+    [[0.58, 0.59], [0.76, 0.71]], [[0.58, 0.66], [0.74, 0.79]]
+  ],
+  strike: [
+    [[0.40, 0.75], [0.30, 0.91]], [[0.44, 0.76], [0.33, 0.92]],
+    [[0.38, 0.48], [0.21, 0.48]], [[0.38, 0.47], [0.27, 0.30]],
+    [[0.62, 0.48], [0.72, 0.31]], [[0.62, 0.47], [0.75, 0.31]],
+    [[0.63, 0.48], [0.84, 0.48]], [[0.60, 0.72], [0.72, 0.91]]
+  ]
+};
+const magicSwordHiddenFrames = {
+  crouch: {
+    4: new Set([0, 1, 2, 4])
+  }
+};
 const minPitch = Math.PI / 9;
 const maxPitch = Math.PI * 7 / 18;
 const bombThrowDuration = 0.82;
 const bombReleaseTime = 0.47;
+const doorTraversalTiming = { align: 0.2, open: 0.48, pass: 0.72, close: 0.48 };
 const gravity = 980;
 const elevatedExitHeight = 112;
-const elevatedChamberWallHeight = 248;
+const elevatedChamberWallHeight = raisedPlatformClearance + elevatedExitHeight + meter * 0.75;
 const elevatedExitKnob = { across: 0.82, up: 0.43 };
 const geometryViewYaw = { north: 0, east: Math.PI / 2, south: Math.PI, west: -Math.PI / 2 };
 if (geometryTestMode && geometryTestView && !(geometryTestView in geometryViewYaw)) {
@@ -45,6 +89,7 @@ if (geometryTestMode && geometryTestView && !(geometryTestView in geometryViewYa
 const progressStorageKey = "webrunner-progress-v1";
 const importedSaveStorageKey = "webrunner-imported-save-v1";
 const settingsStorageKey = "webrunner-settings-v1";
+const worldStateStorageKey = "webrunner-world-state-v1";
 const abilityGroups = {
   mana: {
     duration: 20,
@@ -92,6 +137,7 @@ function readImportedSave() {
 }
 
 function readProgress() {
+  const resetLevel = query.get("reset") === "1";
   let stored = {};
   try {
     stored = JSON.parse(window.sessionStorage.getItem(progressStorageKey) || "{}");
@@ -99,7 +145,7 @@ function readProgress() {
     stored = {};
   }
   const numberValue = (name, fallback, minimum = 0, maximum = 9999) => {
-    const value = Number(query.get(name) ?? stored[name]);
+    const value = resetLevel ? Number.NaN : Number(query.get(name) ?? stored[name]);
     return Number.isFinite(value) ? Math.max(minimum, Math.min(maximum, value)) : fallback;
   };
   const abilityValue = (group) => {
@@ -128,18 +174,21 @@ const savedSettings = readSettings();
 const state = {
   width: window.innerWidth,
   height: window.innerHeight,
-  yaw: geometryTestMode && geometryTestView in geometryViewYaw
+    yaw: isLevelOneTwo ? 0 : geometryTestMode && geometryTestView in geometryViewYaw
     ? geometryViewYaw[geometryTestView]
     : geometryTestMode && Number.isFinite(geometryTestYaw)
       ? geometryTestYaw
       : geometryTestFine ? -Math.PI / 4 : Math.PI / 4,
   pitch: geometryTestMode && Number.isFinite(geometryTestPitch) ? clamp(geometryTestPitch, minPitch, maxPitch) : Math.PI / 4,
   projectionY: Math.sin(geometryTestMode && Number.isFinite(geometryTestPitch) ? clamp(geometryTestPitch, minPitch, maxPitch) : Math.PI / 4),
-  zoom: geometryTestFine ? 1.25 : geometryTestCoarse ? 0.55 : 1,
+  zoom: isLevelOneTwo ? platformCameraZoom : geometryTestFine ? 1.25 : geometryTestCoarse ? 0.55 : defaultCameraZoom,
   fade: query.get("fade") === "1" ? 1 : 0,
+  fadeSpeed: query.get("fastFade") === "1" ? 4 : 1,
   transitioning: false,
   transitionTarget: null,
   transitionDelay: 0,
+  transitionFadeSpeed: 1,
+  doorSequence: null,
   paused: false,
   pausePanel: "main",
   settings: savedSettings,
@@ -153,18 +202,19 @@ const state = {
     mana: { id: savedProgress.manaTime > 0 ? savedProgress.manaAbility : null, remaining: savedProgress.manaAbility ? savedProgress.manaTime : 0 },
     magic: { id: savedProgress.magicTime > 0 ? savedProgress.magicAbility : null, remaining: savedProgress.magicAbility ? savedProgress.magicTime : 0 }
   },
+  discoveredSecrets: new Set(),
   player: {
-    x: levelId === 1 && geometryTestFine
+    x: isLevelOneOne && geometryTestFine
       ? (geometryTestFocus === "water" ? -200 : geometryTestFocus === "columns" ? -120 : 250) * levelOnePlanScale
-      : 0,
-    y: levelId === 1
+      : isLevelOneTwo ? -920 : 0,
+    y: isLevelOneOne
       ? (geometryTestMode ? (["water", "columns"].includes(geometryTestFocus) ? -650 : -850) * levelOnePlanScale : 360 * levelOnePlanScale)
-      : 0,
-    heading: levelId === 1 ? -Math.PI / 2 : 0,
+      : isLevelOneTwo ? 0 : 0,
+    heading: isLevelOneOne ? -Math.PI / 2 : 0,
     speed: 255,
     stride: 0,
     z: 0,
-    floorZ: 0,
+    floorZ: isLevelOneTwo ? platformTopElevation : 0,
     vz: 0,
     jumpAge: 0,
     jumpArm: 0,
@@ -189,6 +239,8 @@ const state = {
     hitFlash: 0,
     ledge: null,
     ledgeGrabCooldown: 0
+    ,falling: false
+    ,fallTime: 0
   },
   tutorial: isTutorial ? {
     step: 0,
@@ -231,41 +283,44 @@ const levels = {
     potions: [],
     exit: null
   },
-  1: {
-    name: "Level 1",
+  "1.1": {
+    name: "Level 1.1",
     kind: "dungeon",
     bounds: [
       { x: -300, y: 140, w: 600, h: 460, name: "start" },
       { x: -56, y: 140 - 10 * meter, w: 112, h: 10 * meter, name: "corridor" },
       { x: -380, y: -920, w: 760, h: 580, name: "pool" }
     ],
-    platformHeight: 112,
+    platformHeight: raisedPlatformClearance,
     upperPlatform: { x: -380, y: -920, w: 760, h: 114 },
     stairs: { x: -380, bottomY: -430, w: 110, treadDepth: 42, steps: 12 },
     exit: { x: 292, y: -920, w: 62, h: 42 },
+    doors: [
+      { id: "exit", x: 292, y: -920, w: 62, height: elevatedExitHeight, normalX: 0, normalY: 1, elevation: "platform", target: "level1-2.html?fade=1&entry=entrance" }
+    ],
     waterPools: [
       { x: -248, y: -920, w: 112, h: 515 },
-      { x: 155, y: -920, w: 170, h: 515 }
+      { x: 136, y: -920, w: 112, h: 515 }
     ],
     coins: [
       { x: -220, y: -770, collected: false },
       { x: -200, y: -665, collected: false },
       { x: -180, y: -500, collected: false },
-      { x: 185, y: -742, collected: false },
-      { x: 235, y: -610, collected: false },
-      { x: 285, y: -455, collected: false }
+      { x: 220, y: -770, collected: false },
+      { x: 200, y: -665, collected: false },
+      { x: 180, y: -500, collected: false }
     ],
     potions: [
-      { x: -26, y: -612, type: "health", color: 0x38dd78, glow: 0x36e07d, collected: false },
+      { x: -28, y: -612, type: "health", color: 0x38dd78, glow: 0x36e07d, collected: false },
       { x: 28, y: -612, type: "mana", color: 0x9b58ff, glow: 0xa058ff, collected: false }
     ],
     columns: [
       { x: -120, y: -780 },
       { x: 0, y: -780 },
-      { x: 100, y: -780 },
+      { x: 120, y: -780 },
       { x: -120, y: -535 },
       { x: 0, y: -535 },
-      { x: 100, y: -535 }
+      { x: 120, y: -535 }
     ],
     torches: [
       { x: -230, y: 140 },
@@ -287,7 +342,91 @@ const levels = {
       { x: -82, y: -690, phase: 0.08, activation: "corridorHalfway" },
       { x: 92, y: -505, phase: 0.58, activation: "corridorHalfway" },
       { x: 20, y: -430, phase: 0.84, activation: "corridorHalfway" }
+    ],
+    vines: [
+      { id: "start-back-left", x: -180, y: 140, tangentX: 1, tangentY: 0, size: "small", middleCount: 0, width: 44, topZ: 73, height: 62 },
+      { id: "start-left", x: -300, y: 410, tangentX: 0, tangentY: 1, size: "small", middleCount: 0, width: 42, topZ: 72, height: 59, mirror: true },
+      { id: "start-right", x: 300, y: 500, tangentX: 0, tangentY: 1, size: "small", middleCount: 0, width: 39, topZ: 70, height: 55 },
+      { id: "corridor-left", x: -56, y: -15, tangentX: 0, tangentY: 1, size: "small", middleCount: 1, width: 48, topZ: 91, height: 82 },
+      { id: "corridor-right", x: 56, y: -220, tangentX: 0, tangentY: 1, size: "small", middleCount: 0, width: 43, topZ: 89, height: 72, mirror: true },
+      { id: "chamber-front-left", x: -250, y: -340, tangentX: 1, tangentY: 0, size: "medium", middleCount: 1, width: 86, topZ: 228, height: 194 },
+      { id: "chamber-back-left", x: -290, y: -920, tangentX: 1, tangentY: 0, size: "large", middleCount: 1, width: 108, topZ: 232, height: 208, mirror: true },
+      { id: "chamber-back-center", x: -65, y: -920, tangentX: 1, tangentY: 0, size: "medium", middleCount: 2, width: 82, topZ: 226, height: 202 },
+      { id: "chamber-back-right", x: 210, y: -920, tangentX: 1, tangentY: 0, size: "large", middleCount: 1, width: 102, topZ: 230, height: 204 },
+      { id: "chamber-left", x: -380, y: -650, tangentX: 0, tangentY: 1, size: "medium", middleCount: 1, width: 84, topZ: 224, height: 188 },
+      { id: "chamber-right", x: 380, y: -520, tangentX: 0, tangentY: 1, size: "medium", middleCount: 1, width: 80, topZ: 220, height: 184, mirror: true }
+    ],
+    secrets: [
+      {
+        id: "western-cache",
+        name: "Western Cache",
+        areas: [
+          { x: -430, y: 330, w: 130, h: 90, kind: "tunnel" },
+          { x: -650, y: 230, w: 220, h: 290, kind: "room" }
+        ],
+        opening: { x: -300, y: 330, w: 0, h: 90 },
+        control: {
+          id: "western-cache-lever",
+          type: "lever",
+          x: -300,
+          y: 450,
+          z: 42,
+          radius: meter * 0.9,
+          blockedBy: [{ type: "enemy", id: "dungeon-slime-1" }]
+        }
+      },
+      {
+        id: "eastern-passage",
+        name: "Eastern Passage",
+        areas: [
+          { x: 380, y: -665, w: 130, h: 90, kind: "tunnel" },
+          { x: 510, y: -790, w: 220, h: 340, kind: "room" }
+        ],
+        opening: { x: 380, y: -665, w: 0, h: 90 },
+        control: {
+          id: "eastern-passage-button",
+          type: "button",
+          x: 210,
+          y: -920,
+          z: 164,
+          radius: meter * 0.9,
+          minFloorZ: 100
+        }
+      }
     ]
+  },
+  "1.2": {
+    name: "Level 1.2",
+    kind: "platform",
+    bounds: [{ x: -1040, y: -180, w: 2080, h: 360, name: "room" }],
+    backWall: { x: -1040, y: -180, w: 2080, height: 180 },
+    platforms: [
+      { x: -988, y: -180, w: 340, h: 264, name: "entrance" },
+      { x: -504, y: -180, w: 240, h: 264, name: "platform-2" },
+      { x: -120, y: -180, w: 240, h: 264, name: "platform-3" },
+      { x: 264, y: -180, w: 240, h: 264, name: "platform-4" },
+      { x: 648, y: -180, w: 340, h: 264, name: "exit-platform" }
+    ],
+    doors: [
+      { id: "entrance", x: -901, y: -180, w: 62, height: 112, normalX: 0, normalY: 1, elevation: "platform", target: "level1.html?fade=1&entry=exit" },
+      { id: "exit", x: 904, y: -180, w: 62, height: 112, normalX: 0, normalY: 1, elevation: "platform", target: "level0.html?fade=1" }
+    ],
+    exit: { x: 904, y: -180, w: 62, h: 72 },
+    vines: [
+      { id: "platform-wall-1", x: -1010, y: -180, tangentX: 1, tangentY: 0, size: "medium", middleCount: 1, width: 76, topZ: 196, height: 150, mirror: true },
+      { id: "platform-wall-2", x: -650, y: -180, tangentX: 1, tangentY: 0, size: "large", middleCount: 1, width: 94, topZ: 198, height: 164 },
+      { id: "platform-wall-3", x: -175, y: -180, tangentX: 1, tangentY: 0, size: "small", middleCount: 1, width: 58, topZ: 194, height: 142 },
+      { id: "platform-wall-4", x: 300, y: -180, tangentX: 1, tangentY: 0, size: "medium", middleCount: 1, width: 80, topZ: 197, height: 158, mirror: true },
+      { id: "platform-wall-5", x: 710, y: -180, tangentX: 1, tangentY: 0, size: "large", middleCount: 1, width: 92, topZ: 199, height: 168 }
+    ],
+    torches: [],
+    columns: [],
+    waterPools: [],
+    coins: [],
+    potions: [
+      { x: 935, y: 18, type: "magic", color: 0x71d8ff, glow: 0x87e5ff, collected: false }
+    ],
+    enemies: []
   }
 };
 
@@ -310,15 +449,26 @@ function scaleLevelPlan(level, factor) {
   level.stairs.w *= factor;
   level.stairs.steps *= factor;
   scaleRect(level.exit);
+  level.doors?.forEach((door) => {
+    door.x *= factor;
+    door.y *= factor;
+    door.w *= factor;
+  });
   level.waterPools.forEach(scaleRect);
   level.coins.forEach(scalePoint);
   level.potions.forEach(scalePoint);
   level.columns.forEach(scalePoint);
   level.torches.forEach(scalePoint);
   level.enemies.forEach(scalePoint);
+  level.vines?.forEach(scalePoint);
+  level.secrets?.forEach((secret) => {
+    secret.areas.forEach(scaleRect);
+    scaleRect(secret.opening);
+    scalePoint(secret.control);
+  });
 }
 
-scaleLevelPlan(levels[1], levelOnePlanScale);
+scaleLevelPlan(levels["1.1"], levelOnePlanScale);
 
 function stairGeometry(levelPlan) {
   const stair = levelPlan.stairs;
@@ -339,7 +489,7 @@ function validateDungeonGeometry(levelPlan) {
   const stair = stairGeometry(levelPlan);
   const epsilon = 0.01;
   const assertTouching = (condition, message) => {
-    if (!condition) throw new Error(`Invalid Level 1 geometry: ${message}`);
+    if (!condition) throw new Error(`Invalid Level 1.1 geometry: ${message}`);
   };
 
   assertTouching(Math.abs(platform.x - room.x) <= epsilon, "upper platform must meet the left wall");
@@ -351,6 +501,10 @@ function validateDungeonGeometry(levelPlan) {
   assertTouching(levelPlan.exit.x >= platform.x && levelPlan.exit.x + levelPlan.exit.w <= platform.x + platform.w, "exit must sit on the platform");
   assertTouching(Math.abs(levelPlan.exit.y - room.y) <= epsilon, "exit must align with the back wall");
   assertTouching(elevatedChamberWallHeight > levelPlan.platformHeight + elevatedExitHeight, "back wall must extend above the exit");
+  assertTouching(
+    levelPlan.platformHeight - raisedPlatformThickness >= characterStandingHeight + meter * 0.5,
+    "raised platforms must leave standing clearance underneath"
+  );
 }
 
 function validateDungeonFineGeometry(levelPlan) {
@@ -358,7 +512,7 @@ function validateDungeonFineGeometry(levelPlan) {
   const stair = stairGeometry(levelPlan);
   const stairBounds = { x: stair.x, y: stair.topY, w: stair.w, h: stair.bottomEdge - stair.topY };
   const assertDetail = (condition, message) => {
-    if (!condition) throw new Error(`Invalid Level 1 detail geometry: ${message}`);
+    if (!condition) throw new Error(`Invalid Level 1.1 detail geometry: ${message}`);
   };
 
   assertDetail(levelPlan.exit.w > 0 && levelPlan.exit.h > 0, "exit footprint must have positive dimensions");
@@ -369,9 +523,62 @@ function validateDungeonFineGeometry(levelPlan) {
     assertDetail(pool.w > waterBasinInset * 2 && pool.h > waterBasinInset * 2, "water pool must contain its inset deep basin");
     assertDetail(Math.abs(pool.y - levelPlan.bounds.find((rect) => rect.name === "pool").y) <= 0.01, "water pool must terminate at the back wall");
   }
+  const [leftPool, rightPool] = [...levelPlan.waterPools].sort((a, b) => a.x - b.x);
+  assertDetail(levelPlan.waterPools.length === 2, "second chamber must contain two mirrored water pools");
+  assertDetail(Math.abs(leftPool.x + leftPool.w + rightPool.x) <= 0.01, "water pools must mirror across the chamber centerline");
+  assertDetail(Math.abs(leftPool.y - rightPool.y) <= 0.01 && Math.abs(leftPool.w - rightPool.w) <= 0.01 && Math.abs(leftPool.h - rightPool.h) <= 0.01, "water pools must have matching dimensions");
   for (const column of levelPlan.columns) {
     assertDetail(!pointInRect(column.x, column.y, stairBounds, columnRadius), "column footprint must not intersect the stairs");
     assertDetail(!levelPlan.waterPools.some((pool) => pointInRect(column.x, column.y, pool, columnRadius)), "column footprint must remain on solid ground");
+  }
+  const pointsAreMirrored = (points) => points.every((point) => points.some((candidate) =>
+    Math.abs(candidate.x + point.x) <= 0.01 && Math.abs(candidate.y - point.y) <= 0.01
+  ));
+  assertDetail(pointsAreMirrored(levelPlan.columns), "column rows must mirror across the chamber centerline");
+  assertDetail(pointsAreMirrored(levelPlan.coins), "pool coins must mirror across the chamber centerline");
+  assertDetail(levelPlan.coins.every((coin) => levelPlan.waterPools.some((pool) => pointInRect(coin.x, coin.y, pool))), "pool coins must remain inside a water pool");
+  assertDetail(pointsAreMirrored(levelPlan.potions), "central potions must mirror across the chamber centerline");
+  for (const torch of levelPlan.torches) {
+    const onWallBoundary = levelPlan.bounds.some((rect) => {
+      const withinX = torch.x >= rect.x - 0.01 && torch.x <= rect.x + rect.w + 0.01;
+      const withinY = torch.y >= rect.y - 0.01 && torch.y <= rect.y + rect.h + 0.01;
+      return (withinX && (Math.abs(torch.y - rect.y) <= 0.01 || Math.abs(torch.y - (rect.y + rect.h)) <= 0.01)) ||
+        (withinY && (Math.abs(torch.x - rect.x) <= 0.01 || Math.abs(torch.x - (rect.x + rect.w)) <= 0.01));
+    });
+    assertDetail(onWallBoundary, `torch at ${torch.x},${torch.y} must be mounted on an active-area wall`);
+  }
+  const vineIds = new Set();
+  for (const vine of levelPlan.vines || []) {
+    const horizontalWall = levelPlan.bounds.some((rect) =>
+      vine.x >= rect.x - 0.01 && vine.x <= rect.x + rect.w + 0.01 &&
+      (Math.abs(vine.y - rect.y) <= 0.01 || Math.abs(vine.y - (rect.y + rect.h)) <= 0.01)
+    );
+    const verticalWall = levelPlan.bounds.some((rect) =>
+      vine.y >= rect.y - 0.01 && vine.y <= rect.y + rect.h + 0.01 &&
+      (Math.abs(vine.x - rect.x) <= 0.01 || Math.abs(vine.x - (rect.x + rect.w)) <= 0.01)
+    );
+    const wallHeight = vine.y <= -340 * levelPlan.planScale
+      ? elevatedChamberWallHeight
+      : vine.y < 140 * levelPlan.planScale ? 98 : 80;
+    assertDetail(!vineIds.has(vine.id), `vine id ${vine.id} must be unique`);
+    assertDetail(["small", "medium", "large"].includes(vine.size), `vine ${vine.id} must use a supported asset size`);
+    assertDetail(horizontalWall || verticalWall, `vine ${vine.id} must be anchored to a wall boundary`);
+    assertDetail((horizontalWall && vine.tangentX !== 0 && vine.tangentY === 0) || (verticalWall && vine.tangentX === 0 && vine.tangentY !== 0), `vine ${vine.id} must follow its wall plane`);
+    assertDetail(vine.topZ <= wallHeight && vine.topZ - vine.height >= 0, `vine ${vine.id} must fit within its wall height`);
+    vineIds.add(vine.id);
+  }
+  const secretIds = new Set();
+  const controlIds = new Set();
+  for (const secret of levelPlan.secrets || []) {
+    assertDetail(!secretIds.has(secret.id), `secret id ${secret.id} must be unique`);
+    assertDetail(Array.isArray(secret.areas) && secret.areas.length > 0, `secret ${secret.id} must contain an area`);
+    assertDetail(secret.areas.every((area) => area.w > 0 && area.h > 0), `secret ${secret.id} areas must have positive dimensions`);
+    assertDetail((secret.opening.w === 0) !== (secret.opening.h === 0), `secret ${secret.id} opening must follow one wall axis`);
+    assertDetail(secret.control && ["button", "lever"].includes(secret.control.type), `secret ${secret.id} must have a button or lever`);
+    assertDetail(!controlIds.has(secret.control.id), `secret control id ${secret.control.id} must be unique`);
+    assertDetail(secret.control.radius > 0, `secret control ${secret.control.id} must have an interaction radius`);
+    secretIds.add(secret.id);
+    controlIds.add(secret.control.id);
   }
   const delayedSlimes = levelPlan.enemies.filter((enemy) => enemy.activation === "corridorHalfway");
   assertDetail(delayedSlimes.length === 3, "second chamber must contain three corridor-gated slimes");
@@ -402,11 +609,139 @@ function validateOrthogonalGeometryViews() {
   }
 }
 
-validateDungeonGeometry(levels[1]);
-validateDungeonFineGeometry(levels[1]);
+function platformTraversalBounds(levelPlan) {
+  return {
+    west: Math.min(...levelPlan.platforms.map((platform) => platform.x)),
+    east: Math.max(...levelPlan.platforms.map((platform) => platform.x + platform.w)),
+    north: Math.max(...levelPlan.platforms.map((platform) => platform.y)),
+    south: Math.min(...levelPlan.platforms.map((platform) => platform.y + platform.h))
+  };
+}
+
+function fittedPlatformCameraZoom(levelPlan, viewportWidth) {
+  const traversal = platformTraversalBounds(levelPlan);
+  return clamp(
+    viewportWidth * 0.92 * platformCameraZoomScale / (traversal.east - traversal.west),
+    platformCameraZoom,
+    1.8 * platformCameraZoomScale
+  );
+}
+
+function validateDoorGeometry(levelPlan, label) {
+  const doors = levelPlan.doors || [];
+  const ids = new Set();
+  const epsilon = 0.01;
+  const assertDoor = (condition, message) => {
+    if (!condition) throw new Error(`Invalid ${label} door geometry: ${message}`);
+  };
+
+  for (const door of doors) {
+    const normalLength = Math.hypot(door.normalX, door.normalY);
+    assertDoor(door.id && !ids.has(door.id), `door id ${door.id || "<missing>"} must be unique`);
+    assertDoor(Number.isFinite(door.x) && Number.isFinite(door.y), `door ${door.id} must have a finite position`);
+    assertDoor(door.w > 0 && door.height > 0, `door ${door.id} must have positive dimensions`);
+    assertDoor(Math.abs(normalLength - 1) <= epsilon, `door ${door.id} must have a unit inward normal`);
+    assertDoor(typeof door.target === "string" && door.target.length > 0, `door ${door.id} must have a destination`);
+    ids.add(door.id);
+  }
+
+  if (levelPlan.kind === "dungeon") {
+    const exitDoor = doors.find((door) => door.id === "exit");
+    assertDoor(exitDoor, "elevated exit must have a configured door");
+    assertDoor(
+      Math.abs(exitDoor.x - levelPlan.exit.x) <= epsilon &&
+        Math.abs(exitDoor.y - levelPlan.exit.y) <= epsilon &&
+        Math.abs(exitDoor.w - levelPlan.exit.w) <= epsilon,
+      "elevated exit door must match the wall opening"
+    );
+  }
+}
+
+function validatePlatformLevelGeometry(levelPlan) {
+  const epsilon = 0.01;
+  const assertPlatform = (condition, message) => {
+    if (!condition) throw new Error(`Invalid Level 1.2 geometry: ${message}`);
+  };
+  const entrancePlatform = levelPlan.platforms.find((platform) => platform.name === "entrance");
+  const exitPlatform = levelPlan.platforms.find((platform) => platform.name === "exit-platform");
+  const entranceDoor = levelPlan.doors.find((door) => door.id === "entrance");
+  const exitDoor = levelPlan.doors.find((door) => door.id === "exit");
+  const magicPotion = levelPlan.potions.find((potion) => potion.type === "magic");
+  const middlePlatforms = levelPlan.platforms.filter((platform) => !["entrance", "exit-platform"].includes(platform.name));
+  const orderedPlatforms = [...levelPlan.platforms].sort((a, b) => a.x - b.x);
+  const platformGaps = orderedPlatforms.slice(1).map((platform, index) => platform.x - (orderedPlatforms[index].x + orderedPlatforms[index].w));
+  const traversal = platformTraversalBounds(levelPlan);
+
+  assertPlatform(levelPlan.platforms.every((platform) => Math.abs(platform.y - levelPlan.backWall.y) <= epsilon), "every platform must meet the back wall");
+  assertPlatform(levelPlan.platforms.every((platform) => platform.h > 0 && platform.w > 0), "platform footprints must have positive dimensions");
+  assertPlatform(traversal.south > traversal.north, "platforms must share a north/south traversal lane");
+  assertPlatform(Math.abs(entrancePlatform.x - traversal.west) <= epsilon, "entrance platform must form the west movement boundary");
+  assertPlatform(Math.abs(entrancePlatform.x + entrancePlatform.w - traversal.east) > epsilon, "entrance platform cannot also form the east movement boundary");
+  assertPlatform(Math.abs(exitPlatform.x + exitPlatform.w - traversal.east) <= epsilon, "exit platform must form the east movement boundary");
+  assertPlatform(middlePlatforms.every((platform) => platform.w < entrancePlatform.w && platform.w < exitPlatform.w), "middle platforms must remain smaller than the entrance and exit platforms");
+  assertPlatform(platformGaps.every((gap) => Math.abs(gap - 144) <= epsilon), "platform gaps must remain ten percent closer than the original layout");
+  assertPlatform(magicPotion && pointInRect(magicPotion.x, magicPotion.y, exitPlatform), "magic potion must sit on the exit platform");
+  assertPlatform(entranceDoor.x >= entrancePlatform.x && entranceDoor.x + entranceDoor.w <= entrancePlatform.x + entrancePlatform.w, "entrance door must align with the entrance platform");
+  assertPlatform(exitDoor.x >= exitPlatform.x && exitDoor.x + exitDoor.w <= exitPlatform.x + exitPlatform.w, "exit door must align with the exit platform");
+  assertPlatform(levelPlan.doors.every((door) => Math.abs(door.y - levelPlan.backWall.y) <= epsilon), "doors must sit against the back wall");
+  assertPlatform(levelPlan.vines.every((vine) => Math.abs(vine.y - levelPlan.backWall.y) <= epsilon), "wall vines must sit against the back wall");
+  assertPlatform(levelPlan.vines.every((vine) => vine.topZ <= platformTopElevation + levelPlan.backWall.height && vine.topZ - vine.height >= platformTopElevation), "wall vines must fit on the back wall");
+  assertPlatform(platformDeathDepth === meter, "death plane must be exactly one meter below platform height");
+}
+
+validateDungeonGeometry(levels["1.1"]);
+validateDungeonFineGeometry(levels["1.1"]);
+validatePlatformLevelGeometry(levels["1.2"]);
+validateDoorGeometry(levels["1.1"], "Level 1.1");
+validateDoorGeometry(levels["1.2"], "Level 1.2");
 validateOrthogonalGeometryViews();
 
-const level = levels[levelKey] || levels[1];
+const level = levels[levelKey] || levels["1.1"];
+function doorElevation(levelPlan, door) {
+  if (door.elevation === "platform") {
+    return levelPlan.kind === "dungeon" ? levelPlan.platformHeight : platformTopElevation;
+  }
+  return Number(door.elevation) || 0;
+}
+
+function placePlayerAtEntryDoor(entryId) {
+  const door = (level.doors || []).find((candidate) => candidate.id === entryId);
+  if (!door) return;
+  const inwardDistance = meter * 1.7;
+  state.player.x = door.x + door.w / 2 + door.normalX * inwardDistance;
+  state.player.y = door.y + door.normalY * inwardDistance;
+  state.player.heading = Math.atan2(door.normalY, door.normalX);
+  state.player.floorZ = doorElevation(level, door);
+  state.player.z = 0;
+  state.player.vz = 0;
+  state.player.grounded = true;
+}
+
+const levelSecretIds = new Set((level.secrets || []).map((secret) => secret.id));
+function readWorldSecretState() {
+  try {
+    const stored = JSON.parse(window.sessionStorage.getItem(worldStateStorageKey) || "{}");
+    return stored && typeof stored === "object" && !Array.isArray(stored) ? stored : {};
+  } catch {
+    return {};
+  }
+}
+const storedWorldState = readWorldSecretState();
+state.discoveredSecrets = new Set(
+  (Array.isArray(storedWorldState[levelKey]) ? storedWorldState[levelKey] : [])
+    .filter((secretId) => levelSecretIds.has(secretId))
+);
+
+function persistSecretDiscovery() {
+  try {
+    const worldState = readWorldSecretState();
+    worldState[levelKey] = [...state.discoveredSecrets];
+    window.sessionStorage.setItem(worldStateStorageKey, JSON.stringify(worldState));
+  } catch {
+    // Secret discovery remains active until this page is closed.
+  }
+}
+
 state.enemies = (level.enemies || []).map((enemy, index) => ({
   id: `dungeon-slime-${index + 1}`,
   name: "Dungeon Slime",
@@ -456,6 +791,13 @@ const tutorialStep = {
   special: 9
 };
 if (loadedGame) restoreGameSnapshot(loadedGame);
+else placePlayerAtEntryDoor(query.get("entry"));
+if (isLevelOneTwo && !geometryTestMode) {
+  state.yaw = 0;
+  state.pitch = Math.PI / 4;
+  state.projectionY = Math.sin(state.pitch);
+  state.zoom = fittedPlatformCameraZoom(level, state.width);
+}
 const hud = isAssetPreload ? null : buildHud(levelId);
 const levelMusic = document.getElementById("levelMusic");
 let resumeMusicAfterPause = false;
@@ -489,6 +831,7 @@ const wallTextureLayer = new Container();
 const g = new Graphics();
 const scenerySpriteLayer = new Container();
 const elevatedLayer = new Graphics();
+const elevatedSceneryLayer = new Container();
 const actorLayer = new Container();
 const actorShadow = new Graphics();
 const actorAura = new Graphics();
@@ -499,17 +842,21 @@ const effectsLayer = new Graphics();
 const occlusionSpriteLayer = new Container();
 const occlusionWallTextureLayer = new Container();
 const occlusionLayer = new Graphics();
+const occlusionDecorationLayer = new Container();
 actorSprite.anchor.set(0.5, 0.9);
 actorLayer.addChild(actorShadow, actorAura, actorSprite, actorFx);
 entityLayer.sortableChildren = true;
 entityLayer.addChild(actorLayer);
-world.addChild(floorLayer, waterLayer, wallTextureLayer, g, scenerySpriteLayer, elevatedLayer, entityLayer, effectsLayer, occlusionSpriteLayer, occlusionWallTextureLayer, occlusionLayer);
+world.addChild(floorLayer, waterLayer, wallTextureLayer, g, scenerySpriteLayer, elevatedLayer, elevatedSceneryLayer, entityLayer, effectsLayer, occlusionSpriteLayer, occlusionWallTextureLayer, occlusionLayer, occlusionDecorationLayer);
 let floorSpriteCount = 0;
 const waterSprites = [];
 const wallTextureSprites = new Map();
 const occlusionWallTextureSprites = new Map();
 const scenerySprites = new Map();
+const elevatedScenerySprites = new Map();
 const occlusionSprites = new Map();
+const vineSprites = new Map();
+const occlusionVineSprites = new Map();
 
 async function loadArt() {
   const loadImage = (path) => new Promise((resolve, reject) => {
@@ -518,7 +865,7 @@ async function loadArt() {
     image.onerror = () => reject(new Error(`Unable to load artwork: ${path}`));
     image.src = new URL(path, window.location.href).href;
   });
-  const [runImage, runStealthImage, actionImage, lowImage, crawlImage, bombImage, bombWalkImage, bombCombatImage, ledgeImage, slimeImage, slimeDeathImage, floorImage, wallImage, columnImage, coinImage, waterImage] = await Promise.all([
+  const [runImage, runStealthImage, actionImage, lowImage, crawlImage, bombImage, bombWalkImage, bombCombatImage, ledgeImage, slimeImage, slimeDeathImage, floorImage, wallImage, columnImage, coinImage, waterImage, potionImage] = await Promise.all([
     loadImage("./assets/art/rogue-run-v3-clean.png"),
     loadImage("./assets/art/rogue-run-stealth-v2-clean.png"),
     loadImage("./assets/art/rogue-action-v2-clean.png"),
@@ -534,8 +881,14 @@ async function loadArt() {
     loadImage("./assets/art/dungeon-wall.png"),
     loadImage("./assets/art/level1-column-v1.png"),
     loadImage("./assets/art/level1-coin-spin-v1-clean.png"),
-    loadImage("./assets/art/level1-water-v1.png")
+    loadImage("./assets/art/level1-water-v1.png"),
+    loadImage("./assets/art/potion-collectibles-v1.png")
   ]);
+  const vineImages = await Promise.all(
+    ["small", "medium", "large"].flatMap((size) => ["base", "middle", "tip"].map((part) =>
+      loadImage(`./assets/art/vines/vine-${size}-${part}-v1.png`)
+    ))
+  );
   const sliceSheet = (image, columns, rows, horizontalInset = 0) => {
     const base = Texture.from(image);
     const cellWidth = Math.floor(image.naturalWidth / columns);
@@ -571,6 +924,15 @@ async function loadArt() {
   floor.source.addressMode = "repeat";
   wall.source.addressMode = "repeat";
   water.source.addressMode = "repeat";
+  const vines = {};
+  let vineImageIndex = 0;
+  for (const size of ["small", "medium", "large"]) {
+    vines[size] = {};
+    for (const part of ["base", "middle", "tip"]) {
+      vines[size][part] = Texture.from(vineImages[vineImageIndex]);
+      vineImageIndex += 1;
+    }
+  }
   return {
     run: sliceSheet(runImage, 8, 8),
     runStealth: sliceSheet(runStealthImage, 4, 8),
@@ -585,9 +947,11 @@ async function loadArt() {
     slimeDeath: sliceSheet(slimeDeathImage, 4, 8),
     column: Texture.from(columnImage),
     coin: sliceSheet(coinImage, 8, 1)[0],
+    potion: sliceSheet(potionImage, 3, 1)[0],
     floor,
     wall,
-    water
+    water,
+    vines
   };
 }
 
@@ -599,7 +963,7 @@ function buildHud(currentLevel) {
       <button class="skip-tutorial" id="skipTutorial" type="button">Skip Tutorial</button>` : `
       <form class="level-jump" id="levelJump">
         <label for="levelInput">Go to Level</label>
-        <input id="levelInput" type="number" inputmode="numeric" min="0" max="1" step="1" value="${currentLevel}">
+        <input id="levelInput" type="number" inputmode="decimal" min="0" max="1.2" step="0.1" value="${currentLevel}">
         <button type="submit">Go</button>
       </form>`;
   const tutorialPanel = isTutorial ? `
@@ -634,7 +998,7 @@ function buildHud(currentLevel) {
     ${isTutorial ? `
     <div class="confirm-overlay hidden" id="skipConfirm">
       <section class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="skipConfirmTitle">
-        <strong id="skipConfirmTitle">Skip Tutorial and Start Level 1: Are you sure?</strong>
+        <strong id="skipConfirmTitle">Skip Tutorial and Start Level 1.1: Are you sure?</strong>
         <div class="confirm-actions">
           <button type="button" id="confirmSkip">Ok</button>
           <button type="button" id="cancelSkip">Cancel</button>
@@ -782,16 +1146,18 @@ function buildHud(currentLevel) {
 
   if (refs.levelInput) {
     refs.levelInput.addEventListener("input", () => {
-      refs.levelInput.value = refs.levelInput.value.replace(/\D/g, "");
+      refs.levelInput.value = refs.levelInput.value.replace(/[^0-9.]/g, "");
     });
     refs.levelJump.addEventListener("submit", (event) => {
       event.preventDefault();
+      if (state.doorSequence || state.transitioning) return;
       const target = Number(refs.levelInput.value);
-      if (!Number.isInteger(target) || !availableLevels.includes(target)) {
+      const targetKey = refs.levelInput.value.trim();
+      if (!availableLevels.some((level) => String(level) === targetKey)) {
         refs.levelInput.value = String(currentLevel);
         return;
       }
-      window.location.href = targetWithProgress(`level${target}.html`);
+      window.location.href = targetWithProgress(targetKey === "1.1" ? "level1.html" : targetKey === "1.2" ? "level1-2.html" : `level${targetKey}.html`);
     });
   }
   return refs;
@@ -941,6 +1307,13 @@ function gameSnapshot() {
     stanceActions: [...state.tutorial.stanceActions],
     lowMovement: [...state.tutorial.lowMovement]
   } : null;
+  const worldSecrets = readWorldSecretState();
+  worldSecrets[levelKey] = [...state.discoveredSecrets];
+  const doorSequence = state.doorSequence ? {
+    ...state.doorSequence,
+    doorId: state.doorSequence.door.id
+  } : null;
+  if (doorSequence) delete doorSequence.door;
   return {
     version: 1,
     savedAt: new Date().toISOString(),
@@ -960,7 +1333,10 @@ function gameSnapshot() {
     projectiles: state.projectiles.map((projectile) => ({ ...projectile })),
     explosions: state.explosions.map((explosion) => ({ ...explosion })),
     scorches: state.scorches.map((scorch) => ({ ...scorch })),
-    tutorial
+    secrets: [...state.discoveredSecrets],
+    worldSecrets,
+    tutorial,
+    doorSequence
   };
 }
 
@@ -984,6 +1360,25 @@ function restoreGameSnapshot(snapshot) {
   state.player.health = clamp(finite(state.player.health, 100), 0, state.player.maxHealth);
   state.player.stance = ["stand", "crouch", "crawl"].includes(state.player.stance) ? state.player.stance : "stand";
   state.player.ledge = snapshot.player?.ledge ? { ...snapshot.player.ledge } : null;
+
+  const savedDoorSequence = snapshot.doorSequence;
+  const savedDoor = (level.doors || []).find((door) => door.id === savedDoorSequence?.doorId);
+  if (savedDoor) {
+    const totalDuration = Object.values(doorTraversalTiming).reduce((sum, duration) => sum + duration, 0);
+    state.doorSequence = {
+      door: savedDoor,
+      elapsed: clamp(finite(savedDoorSequence.elapsed, 0), 0, totalDuration),
+      phase: ["align", "open", "pass", "close"].includes(savedDoorSequence.phase) ? savedDoorSequence.phase : "align",
+      startX: finite(savedDoorSequence.startX, state.player.x),
+      startY: finite(savedDoorSequence.startY, state.player.y),
+      approachX: finite(savedDoorSequence.approachX, state.player.x),
+      approachY: finite(savedDoorSequence.approachY, state.player.y),
+      exitX: finite(savedDoorSequence.exitX, state.player.x),
+      exitY: finite(savedDoorSequence.exitY, state.player.y),
+      openAmount: clamp(finite(savedDoorSequence.openAmount, 0), 0, 1),
+      transitionStarted: false
+    };
+  }
 
   for (const key of Object.keys(state.inventory)) {
     state.inventory[key] = Math.max(0, Math.floor(finite(snapshot.inventory?.[key], state.inventory[key])));
@@ -1011,6 +1406,17 @@ function restoreGameSnapshot(snapshot) {
   state.projectiles = Array.isArray(snapshot.projectiles) ? snapshot.projectiles.map((item) => ({ ...item })) : [];
   state.explosions = Array.isArray(snapshot.explosions) ? snapshot.explosions.map((item) => ({ ...item })) : [];
   state.scorches = Array.isArray(snapshot.scorches) ? snapshot.scorches.map((item) => ({ ...item })) : [];
+  const savedWorldSecrets = snapshot.worldSecrets && typeof snapshot.worldSecrets === "object" && !Array.isArray(snapshot.worldSecrets)
+    ? snapshot.worldSecrets
+    : {};
+  const savedLevelSecrets = Array.isArray(savedWorldSecrets[levelKey]) ? savedWorldSecrets[levelKey] : snapshot.secrets;
+  state.discoveredSecrets = new Set((Array.isArray(savedLevelSecrets) ? savedLevelSecrets : []).filter((secretId) => levelSecretIds.has(secretId)));
+  try {
+    window.sessionStorage.setItem(worldStateStorageKey, JSON.stringify(savedWorldSecrets));
+  } catch {
+    // The restored current-level discovery still remains active in memory.
+  }
+  persistSecretDiscovery();
 
   if (state.tutorial && snapshot.tutorial) {
     const savedTutorial = snapshot.tutorial;
@@ -1129,12 +1535,126 @@ function targetWithProgress(target) {
   return url.href;
 }
 
-function startTransition(target, delay = 0) {
+function startTransition(target, delay = 0, fadeSpeed = 1) {
   if (state.transitioning) return;
   state.transitioning = true;
   state.transitionTarget = targetWithProgress(target);
   state.transitionDelay = delay;
+  state.transitionFadeSpeed = fadeSpeed;
   state.fade = 0;
+}
+
+function updateTransition(delta) {
+  if (state.transitioning) {
+    state.transitionDelay = Math.max(0, state.transitionDelay - delta);
+    if (state.transitionDelay === 0) state.fade = Math.min(1, state.fade + delta * state.transitionFadeSpeed);
+    if (state.fade >= 1 && state.transitionTarget) window.location.href = state.transitionTarget;
+  } else if (state.fade > 0) {
+    state.fade = Math.max(0, state.fade - delta * state.fadeSpeed);
+  }
+}
+
+function beginDoorTraversal(door) {
+  if (state.doorSequence || state.transitioning || !door.target) return false;
+  const centerX = door.x + door.w / 2;
+  const centerY = door.y;
+  const approachDistance = playerCollisionRadius + 3;
+  state.keys.clear();
+  closeItemMenu();
+  Object.assign(state.player, {
+    stance: "stand",
+    grounded: true,
+    z: 0,
+    vz: 0,
+    rollTime: 0,
+    attackTime: 0,
+    specialTime: 0,
+    interactTime: 0,
+    bombThrowTime: 0,
+    ledge: null,
+    floorZ: doorElevation(level, door),
+    heading: Math.atan2(-door.normalY, -door.normalX)
+  });
+  state.doorSequence = {
+    door,
+    elapsed: 0,
+    phase: "align",
+    startX: state.player.x,
+    startY: state.player.y,
+    approachX: centerX + door.normalX * approachDistance,
+    approachY: centerY + door.normalY * approachDistance,
+    exitX: centerX - door.normalX * meter * 0.72,
+    exitY: centerY - door.normalY * meter * 0.72,
+    openAmount: 0,
+    transitionStarted: false
+  };
+  setStatus("Opening door");
+  return true;
+}
+
+function nearbyDoor() {
+  const player = state.player;
+  return (level.doors || []).find((door) => {
+    if (!door.target || Math.abs(player.floorZ + player.z - doorElevation(level, door)) > 18) return false;
+    const centerX = door.x + door.w / 2;
+    const dx = player.x - centerX;
+    const dy = player.y - door.y;
+    const inwardDistance = dx * door.normalX + dy * door.normalY;
+    const tangentDistance = Math.abs(dx * -door.normalY + dy * door.normalX);
+    return inwardDistance >= -2 && inwardDistance <= meter * 1.12 && tangentDistance <= door.w / 2 + 5;
+  });
+}
+
+function tryStartDoorTraversal() {
+  const door = nearbyDoor();
+  return door ? beginDoorTraversal(door) : false;
+}
+
+function updateDoorTraversal(delta) {
+  const sequence = state.doorSequence;
+  if (!sequence) return;
+  const timing = doorTraversalTiming;
+  const alignEnd = timing.align;
+  const openEnd = alignEnd + timing.open;
+  const passEnd = openEnd + timing.pass;
+  const closeEnd = passEnd + timing.close;
+  sequence.elapsed = Math.min(closeEnd, sequence.elapsed + delta);
+
+  if (sequence.elapsed < alignEnd) {
+    sequence.phase = "align";
+    const progress = sequence.elapsed / timing.align;
+    const eased = progress * progress * (3 - 2 * progress);
+    state.player.x = sequence.startX + (sequence.approachX - sequence.startX) * eased;
+    state.player.y = sequence.startY + (sequence.approachY - sequence.startY) * eased;
+    sequence.openAmount = 0;
+  } else if (sequence.elapsed < openEnd) {
+    sequence.phase = "open";
+    const progress = (sequence.elapsed - alignEnd) / timing.open;
+    sequence.openAmount = progress * progress * (3 - 2 * progress);
+    state.player.x = sequence.approachX;
+    state.player.y = sequence.approachY;
+  } else if (sequence.elapsed < passEnd) {
+    if (sequence.phase !== "pass") setStatus("Passing through door");
+    sequence.phase = "pass";
+    sequence.openAmount = 1;
+    const progress = (sequence.elapsed - openEnd) / timing.pass;
+    const eased = progress * progress * (3 - 2 * progress);
+    state.player.x = sequence.approachX + (sequence.exitX - sequence.approachX) * eased;
+    state.player.y = sequence.approachY + (sequence.exitY - sequence.approachY) * eased;
+    state.player.stride += delta * 13;
+  } else {
+    if (sequence.phase !== "close") setStatus("Closing door");
+    sequence.phase = "close";
+    const progress = (sequence.elapsed - passEnd) / timing.close;
+    sequence.openAmount = 1 - progress * progress * (3 - 2 * progress);
+    state.player.x = sequence.exitX;
+    state.player.y = sequence.exitY;
+    if (sequence.elapsed >= closeEnd && !sequence.transitionStarted) {
+      sequence.openAmount = 0;
+      sequence.transitionStarted = true;
+      startTransition(sequence.door.target);
+    }
+  }
 }
 
 function preloadDestination(target) {
@@ -1174,15 +1694,20 @@ function rotate(x, y, angle) {
 }
 
 function worldToScreen(x, y, z = 0) {
-  const p = rotate(x - state.player.x, y - state.player.y, -state.yaw);
+  const cameraX = level.kind === "platform" ? 0 : state.player.x;
+  const cameraY = level.kind === "platform" ? 0 : state.player.y;
+  const cameraFloor = level.kind === "platform" ? 0 : state.player.floorZ;
+  const p = rotate(x - cameraX, y - cameraY, -state.yaw);
   return {
     x: state.width / 2 + p.x * state.zoom,
-    y: state.height / 2 + p.y * state.projectionY * state.zoom - (z - state.player.floorZ) * state.zoom
+    y: state.height / 2 + p.y * state.projectionY * state.zoom - (z - cameraFloor) * state.zoom
   };
 }
 
 function cameraDepth(x, y) {
-  return rotate(x - state.player.x, y - state.player.y, -state.yaw).y;
+  const cameraX = level.kind === "platform" ? 0 : state.player.x;
+  const cameraY = level.kind === "platform" ? 0 : state.player.y;
+  return rotate(x - cameraX, y - cameraY, -state.yaw).y;
 }
 
 function groundDirection(angle) {
@@ -1324,9 +1849,9 @@ function playerInDeepWater() {
     ));
 }
 
-function objectSprite(key, texture, foreground = false) {
-  const sprites = foreground ? occlusionSprites : scenerySprites;
-  const layer = foreground ? occlusionSpriteLayer : scenerySpriteLayer;
+function objectSprite(key, texture, foreground = false, elevated = false) {
+  const sprites = foreground ? occlusionSprites : elevated ? elevatedScenerySprites : scenerySprites;
+  const layer = foreground ? occlusionSpriteLayer : elevated ? elevatedSceneryLayer : scenerySpriteLayer;
   let sprite = sprites.get(key);
   if (!sprite) {
     sprite = new Sprite(texture);
@@ -1342,9 +1867,17 @@ function pointInRect(x, y, rect, pad = 0) {
   return x >= rect.x - pad && x <= rect.x + rect.w + pad && y >= rect.y - pad && y <= rect.y + rect.h + pad;
 }
 
+function pointInDiscoveredSecret(x, y, pad = 0) {
+  return (level.secrets || []).some((secret) =>
+    state.discoveredSecrets.has(secret.id) && secret.areas.some((area) => pointInRect(x, y, area, pad))
+  );
+}
+
 function pointInRawWalkable(x, y) {
   if (level.kind === "infinite") return true;
-  return level.bounds.some((rect) => pointInRect(x, y, rect));
+  if (level.kind === "platform") return pointInRect(x, y, level.bounds[0]);
+  if (level.bounds.some((rect) => pointInRect(x, y, rect))) return true;
+  return pointInDiscoveredSecret(x, y);
 }
 
 function pointInWalkable(x, y, radius = 0) {
@@ -1353,7 +1886,10 @@ function pointInWalkable(x, y, radius = 0) {
   return samples.every(([sx, sy]) => pointInRawWalkable(sx, sy));
 }
 
-function groundElevation(x, y) {
+function groundElevation(x, y, highestReachableSurface = Number.POSITIVE_INFINITY) {
+  if (level.kind === "platform") {
+    return level.platforms.some((platform) => pointInRect(x, y, platform)) ? platformTopElevation : -9999;
+  }
   if (level.kind !== "dungeon") return 0;
   const stairPlan = stairGeometry(level);
   const stairBounds = {
@@ -1366,7 +1902,9 @@ function groundElevation(x, y) {
     const progress = clamp((stairPlan.bottomEdge - y) / (stairPlan.bottomEdge - stairPlan.topEdge), 0, 1);
     return progress * level.platformHeight;
   }
-  if (pointInRect(x, y, level.upperPlatform)) return level.platformHeight;
+  if (pointInRect(x, y, level.upperPlatform) && level.platformHeight <= highestReachableSurface) {
+    return level.platformHeight;
+  }
   for (const column of level.columns) {
     if (Math.hypot(x - column.x, y - column.y) <= columnRadius) return 70;
   }
@@ -1627,13 +2165,219 @@ function drawDungeonFloor() {
     rectWorld({ x: pool.x + 7, y: pool.y + 7, w: pool.w - 14, h: pool.h - 14 }, 0x2b7276, null, 0.06);
     outlineWorldRect(basin, 0x8eb4b1, 4.5, 0.82);
   });
+  drawDiscoveredSecrets();
   drawWalls();
+  drawSecretControls();
+  drawWallVines();
   drawSceneObjects();
   drawStairs(elevatedLayer);
   drawUpperPlatform(elevatedLayer);
 }
 
-function drawWalls(target = g, foregroundOnly = false) {
+function drawDiscoveredSecrets() {
+  for (const secret of level.secrets || []) {
+    if (!state.discoveredSecrets.has(secret.id)) continue;
+    for (const area of secret.areas) {
+      const corners = [
+        worldToScreen(area.x, area.y, 0),
+        worldToScreen(area.x + area.w, area.y, 0),
+        worldToScreen(area.x + area.w, area.y + area.h, 0),
+        worldToScreen(area.x, area.y + area.h, 0)
+      ];
+      poly(corners, area.kind === "tunnel" ? 0x526267 : 0x445157, 0x84969a, 2.5, 0.2);
+      const outwardNormals = [{ x: 0, y: -1 }, { x: 1, y: 0 }, { x: 0, y: 1 }, { x: -1, y: 0 }];
+      const revealedAreas = (level.secrets || [])
+        .filter((candidate) => state.discoveredSecrets.has(candidate.id))
+        .flatMap((candidate) => candidate.areas);
+      for (let index = 0; index < corners.length; index += 1) {
+        const next = (index + 1) % corners.length;
+        const edgeWorld = [
+          { x: area.x + area.w / 2, y: area.y },
+          { x: area.x + area.w, y: area.y + area.h / 2 },
+          { x: area.x + area.w / 2, y: area.y + area.h },
+          { x: area.x, y: area.y + area.h / 2 }
+        ][index];
+        const normal = outwardNormals[index];
+        const joinsWalkableArea = [...level.bounds, ...revealedAreas].some((rect) =>
+          rect !== area && pointInRect(edgeWorld.x + normal.x * 2, edgeWorld.y + normal.y * 2, rect)
+        );
+        if (joinsWalkableArea) continue;
+        const topA = { x: corners[index].x, y: corners[index].y - 42 * state.zoom };
+        const topB = { x: corners[next].x, y: corners[next].y - 42 * state.zoom };
+        poly([corners[index], corners[next], topB, topA], 0x566166, 0x91a0a2, 1.5, 0.1);
+      }
+    }
+  }
+}
+
+function secretControlBlocked(control) {
+  for (const blocker of control.blockedBy || []) {
+    if (blocker.type === "enemy") {
+      const enemy = state.enemies.find((candidate) => candidate.id === blocker.id);
+      if (enemy?.alive && !enemy.removed) return true;
+    }
+    if (blocker.type === "secret" && !state.discoveredSecrets.has(blocker.id)) return true;
+    if (blocker.type === "movingWall" && !state.discoveredSecrets.has(blocker.openedBy)) return true;
+    if (blocker.type === "item") {
+      const collection = blocker.collection === "potions" ? level.potions : level.coins;
+      const item = collection.find((candidate) => candidate.id === blocker.id);
+      if (item && !item.collected) return true;
+    }
+    if (blocker.type === "coin") {
+      const coin = level.coins.find((candidate) => candidate.id === blocker.id);
+      if (coin && !coin.collected) return true;
+    }
+    if (blocker.type === "potion") {
+      const potion = level.potions.find((candidate) => candidate.id === blocker.id);
+      if (potion && !potion.collected) return true;
+    }
+  }
+  return false;
+}
+
+function drawSecretControls() {
+  for (const secret of level.secrets || []) {
+    const control = secret.control;
+    const active = state.discoveredSecrets.has(secret.id);
+    const p = worldToScreen(control.x, control.y, control.z);
+    const s = state.zoom;
+    const plateColor = active ? 0x47664e : 0x302d28;
+    g.roundRect(p.x - 12 * s, p.y - 15 * s, 24 * s, 30 * s, 3 * s)
+      .fill({ color: plateColor, alpha: 0.96 })
+      .stroke({ color: 0x100e0b, width: 2 * s });
+    if (control.type === "button") {
+      g.circle(p.x, p.y, 6 * s)
+        .fill(active ? 0x78b087 : 0x8f513d)
+        .stroke({ color: 0x17120e, width: 2 * s });
+    } else {
+      const leverEnd = active
+        ? { x: p.x + 8 * s, y: p.y + 8 * s }
+        : { x: p.x - 7 * s, y: p.y - 18 * s };
+      line({ x: p.x, y: p.y + 5 * s }, leverEnd, active ? 0x99b49a : 0xb5a075, 5 * s, 1);
+      g.circle(leverEnd.x, leverEnd.y, 5 * s).fill(active ? 0x6e9b75 : 0x6d392c);
+    }
+  }
+}
+
+function drawWallVines(foreground = false, forceVisible = null) {
+  if (!level.vines || !art.vines) return;
+  const sprites = foreground ? occlusionVineSprites : vineSprites;
+  const layer = foreground ? occlusionDecorationLayer : scenerySpriteLayer;
+  const overlap = 0.1;
+
+  for (const vine of level.vines) {
+    if (foreground && cameraDepth(vine.x, vine.y) <= 8 && !forceVisible?.(vine)) continue;
+    const textures = art.vines[vine.size] || art.vines.medium;
+    const parts = ["base", ...Array(vine.middleCount || 0).fill("middle"), "tip"];
+    const moduleHeight = vine.height / (parts.length - overlap * (parts.length - 1));
+    const moduleStep = moduleHeight * (1 - overlap);
+    const mirror = vine.mirror ? -1 : 1;
+
+    parts.forEach((part, index) => {
+      const texture = textures[part];
+      const key = `${vine.id}:${index}`;
+      let sprite = sprites.get(key);
+      if (!sprite) {
+        sprite = new Sprite(texture);
+        sprite.anchor.set(0, 0);
+        sprites.set(key, sprite);
+        layer.addChild(sprite);
+      }
+
+      const topZ = vine.topZ - index * moduleStep;
+      const bottomZ = topZ - moduleHeight;
+      const halfWidth = vine.width / 2;
+      const leftX = vine.x - vine.tangentX * halfWidth * mirror;
+      const leftY = vine.y - vine.tangentY * halfWidth * mirror;
+      const rightX = vine.x + vine.tangentX * halfWidth * mirror;
+      const rightY = vine.y + vine.tangentY * halfWidth * mirror;
+      const topLeft = worldToScreen(leftX, leftY, topZ);
+      const topRight = worldToScreen(rightX, rightY, topZ);
+      const bottomLeft = worldToScreen(leftX, leftY, bottomZ);
+
+      sprite.visible = true;
+      sprite.texture = texture;
+      sprite.alpha = (vine.alpha || 0.94) * (state.settings.graphics === "low" ? 0.78 : 1);
+      sprite.tint = 0xf4ead2;
+      sprite.setFromMatrix(new Matrix(
+        (topRight.x - topLeft.x) / texture.width,
+        (topRight.y - topLeft.y) / texture.width,
+        (bottomLeft.x - topLeft.x) / texture.height,
+        (bottomLeft.y - topLeft.y) / texture.height,
+        topLeft.x,
+        topLeft.y
+      ));
+    });
+  }
+}
+
+function drawPlatformRoom() {
+  const room = level.bounds[0];
+  rectWorld(room, 0x0c1014, 0x29333b, 1);
+  const wall = level.backWall;
+  drawWallSegment(
+    wall.x,
+    wall.y,
+    wall.x + wall.w,
+    wall.y,
+    0x241e18,
+    wall.height,
+    g,
+    platformTopElevation,
+    true,
+    `platform-back-wall:${wall.x}:${wall.y}:${wall.w}`
+  );
+  for (const door of level.doors) {
+    if (!doorOccludesPlayer(door)) drawConfiguredDoor(door, g);
+  }
+  drawWallVines();
+  for (const platform of level.platforms) {
+    drawPlatformPrism(platform, platformTopElevation, elevatedLayer, true);
+  }
+  drawSceneObjects(elevatedLayer, true);
+}
+
+function splitWallAtSecretOpenings(segment) {
+  const [x1, y1, x2, y2, fill] = segment;
+  const vertical = Math.abs(x1 - x2) < 0.01;
+  const horizontal = Math.abs(y1 - y2) < 0.01;
+  if (!vertical && !horizontal) return [segment];
+
+  const start = vertical ? y1 : x1;
+  const end = vertical ? y2 : x2;
+  const length = end - start;
+  let spans = [{ from: 0, to: 1 }];
+  for (const secret of level.secrets || []) {
+    if (!state.discoveredSecrets.has(secret.id)) continue;
+    const opening = secret.opening;
+    const matches = vertical
+      ? opening.w === 0 && Math.abs(opening.x - x1) < 0.01
+      : opening.h === 0 && Math.abs(opening.y - y1) < 0.01;
+    if (!matches) continue;
+    const openingStart = vertical ? opening.y : opening.x;
+    const openingEnd = openingStart + (vertical ? opening.h : opening.w);
+    const cutFrom = clamp(Math.min((openingStart - start) / length, (openingEnd - start) / length), 0, 1);
+    const cutTo = clamp(Math.max((openingStart - start) / length, (openingEnd - start) / length), 0, 1);
+    spans = spans.flatMap((span) => {
+      if (cutTo <= span.from || cutFrom >= span.to) return [span];
+      const pieces = [];
+      if (cutFrom > span.from) pieces.push({ from: span.from, to: cutFrom });
+      if (cutTo < span.to) pieces.push({ from: cutTo, to: span.to });
+      return pieces;
+    });
+  }
+  return spans
+    .filter((span) => span.to - span.from > 0.0001)
+    .map((span) => [
+      x1 + (x2 - x1) * span.from,
+      y1 + (y2 - y1) * span.from,
+      x1 + (x2 - x1) * span.to,
+      y1 + (y2 - y1) * span.to,
+      fill
+    ]);
+}
+
+function drawWalls(target = g, foregroundOnly = false, forceExitWall = false) {
   const planScale = level.planScale || 1;
   const s = (value) => value * planScale;
   const segments = [
@@ -1643,8 +2387,9 @@ function drawWalls(target = g, foregroundOnly = false) {
     [s(380), s(-340), s(380), s(-920), 0x191510], [s(380), s(-920), s(354), s(-920), 0x2d261e], [s(292), s(-920), s(-380), s(-920), 0x2d261e],
     [s(-380), s(-920), s(-380), s(-340), 0x17130f]
   ];
-  for (const [x1, y1, x2, y2, fill] of segments) {
-    const visible = foregroundOnly ? clipSegmentInFront(x1, y1, x2, y2) : { x1, y1, x2, y2 };
+  for (const [x1, y1, x2, y2, fill] of segments.flatMap(splitWallAtSecretOpenings)) {
+    const exitWallSegment = forceExitWall && Math.abs(y1 - level.exit.y) <= 0.01 && Math.abs(y2 - level.exit.y) <= 0.01;
+    const visible = foregroundOnly && !exitWallSegment ? clipSegmentInFront(x1, y1, x2, y2) : { x1, y1, x2, y2 };
     if (!visible) continue;
     const midpointY = (y1 + y2) / 2;
     const wallHeight = midpointY <= s(-340) ? elevatedChamberWallHeight : midpointY < s(140) ? 98 : 80;
@@ -1665,7 +2410,7 @@ function drawWalls(target = g, foregroundOnly = false) {
       visible.clippedEnd
     );
   }
-  drawElevatedDoorwayWall(target, foregroundOnly);
+  drawElevatedDoorwayWall(target, foregroundOnly && !forceExitWall);
   drawWaterTunnels(target, foregroundOnly);
 }
 
@@ -1839,7 +2584,7 @@ function texturedFace(points, texture, tint = 0xffffff, alpha = 1, scale = 0.13,
   }).stroke({ color: 0x080706, width: 2 });
 }
 
-function drawPlatformPrism(rect, z, target = g) {
+function drawPlatformPrism(rect, z, target = g, fadeBottom = false) {
   const corners = [
     { x: rect.x, y: rect.y },
     { x: rect.x + rect.w, y: rect.y },
@@ -1862,14 +2607,36 @@ function drawPlatformPrism(rect, z, target = g) {
   for (const side of visibleSides) {
     const a = corners[side.index];
     const b = corners[side.nextIndex];
+    const platformDepth = fadeBottom ? 92 : raisedPlatformThickness;
+    const bottomB = worldToScreen(b.x, b.y, z - platformDepth);
+    const bottomA = worldToScreen(a.x, a.y, z - platformDepth);
     const face = [
       top[side.index],
       top[side.nextIndex],
-      worldToScreen(b.x, b.y, z - 38),
-      worldToScreen(a.x, a.y, z - 38)
+      bottomB,
+      bottomA
     ];
     poly(face, side.index % 2 ? 0x4b4338 : 0x373129, 0x080706, 2, 1, target);
     texturedFace(face, art.wall, side.index % 2 ? 0xb5a287 : 0x95856f, 1, 0.1, target);
+    if (fadeBottom) {
+      const topA = top[side.index];
+      const topB = top[side.nextIndex];
+      const interpolate = (from, to, amount) => ({
+        x: from.x + (to.x - from.x) * amount,
+        y: from.y + (to.y - from.y) * amount
+      });
+      const bands = 7;
+      for (let band = 0; band < bands; band += 1) {
+        const start = band / bands;
+        const end = (band + 1) / bands;
+        poly([
+          interpolate(topA, bottomA, start),
+          interpolate(topB, bottomB, start),
+          interpolate(topB, bottomB, end),
+          interpolate(topA, bottomA, end)
+        ], 0x000000, null, 1, 0.06 + band * 0.135, target);
+      }
+    }
   }
   poly(top, 0x4c4942, 0x080706, 2, 1, target);
   texturedFace(top, art.floor, 0xf0dfc3, 1, 0.11, target);
@@ -1888,14 +2655,54 @@ function drawUpperPlatform(target = g) {
 }
 
 function drawElevatedExit(target = g) {
-  const z = level.platformHeight;
-  const x1 = level.exit.x;
-  const x2 = level.exit.x + level.exit.w;
-  const y = level.bounds[2].y + 1;
-  const height = elevatedExitHeight;
+  const door = level.doors.find((candidate) => candidate.id === "exit");
+  if (!door) return;
+  const foreground = target === occlusionLayer;
+  const shouldRenderInForeground = doorOccludesPlayer(door) || playerHasExitedDoor(door);
+  if (foreground === shouldRenderInForeground) drawConfiguredDoor(door, target);
+}
+
+function configuredDoorOpenAmount(door) {
+  return state.doorSequence?.door.id === door.id ? state.doorSequence.openAmount : 0;
+}
+
+function doorOccludesPlayer(door) {
+  const doorDepth = cameraDepth(door.x + door.w / 2, door.y);
+  const playerDepth = cameraDepth(state.player.x, state.player.y);
+  return doorDepth > playerDepth + 2;
+}
+
+function playerHasExitedDoor(door) {
+  const sequence = state.doorSequence;
+  if (!sequence || sequence.door.id !== door.id) return false;
+  const dx = state.player.x - (door.x + door.w / 2);
+  const dy = state.player.y - door.y;
+  return dx * door.normalX + dy * door.normalY < 0;
+}
+
+function drawConfiguredDoor(door, target = g) {
+  drawWoodenDoor(door, doorElevation(level, door), configuredDoorOpenAmount(door), target);
+}
+
+function drawWoodenDoor(door, z, openAmount = 0, target = g) {
+  const x1 = door.x;
+  const x2 = door.x + door.w;
+  const y = door.y + 0.5;
+  const height = door.height;
+  const closedBottomLeft = worldToScreen(x1, y, z);
+  const closedBottomRight = worldToScreen(x2, y, z);
+  const closedTopRight = worldToScreen(x2, y, z + height);
+  const closedTopLeft = worldToScreen(x1, y, z + height);
+  poly([closedBottomLeft, closedBottomRight, closedTopRight, closedTopLeft], 0x050403, 0x080706, 2, 1, target);
+
+  const angle = clamp(openAmount, 0, 1) * Math.PI / 2;
+  const tangentX = door.normalY;
+  const tangentY = -door.normalX;
+  const freeX = x1 + tangentX * door.w * Math.cos(angle) + door.normalX * door.w * Math.sin(angle);
+  const freeY = y + tangentY * door.w * Math.cos(angle) + door.normalY * door.w * Math.sin(angle);
   const bottomLeft = worldToScreen(x1, y, z);
-  const bottomRight = worldToScreen(x2, y, z);
-  const topRight = worldToScreen(x2, y, z + height);
+  const bottomRight = worldToScreen(freeX, freeY, z);
+  const topRight = worldToScreen(freeX, freeY, z + height);
   const topLeft = worldToScreen(x1, y, z + height);
   poly([bottomLeft, bottomRight, topRight, topLeft], 0x24150f, 0xb5904e, 4, 1, target);
   for (let i = 1; i < 4; i += 1) {
@@ -1909,9 +2716,10 @@ function drawElevatedExit(target = g) {
       target
     );
   }
+  line(closedTopLeft, closedTopRight, 0xe2c078, 5, 0.9, target);
+  line(closedBottomLeft, closedTopLeft, 0x72552e, 4, 0.95, target);
+  line(closedBottomRight, closedTopRight, 0x72552e, 4, 0.95, target);
   line(topLeft, topRight, 0xe2c078, 5, 0.9, target);
-  line(bottomLeft, topLeft, 0x72552e, 4, 0.95, target);
-  line(bottomRight, topRight, 0x72552e, 4, 0.95, target);
   const knob = {
     x: bottomLeft.x + (bottomRight.x - bottomLeft.x) * elevatedExitKnob.across + (topLeft.x - bottomLeft.x) * elevatedExitKnob.up,
     y: bottomLeft.y + (bottomRight.y - bottomLeft.y) * elevatedExitKnob.across + (topLeft.y - bottomLeft.y) * elevatedExitKnob.up
@@ -1951,11 +2759,36 @@ function drawUpperPlatformOccluder() {
 }
 
 function drawForegroundOccluders() {
+  if (level.kind === "platform") {
+    const crossedDoor = level.doors.find(playerHasExitedDoor);
+    if (crossedDoor) {
+      const wall = level.backWall;
+      drawWallSegment(
+        wall.x,
+        wall.y,
+        wall.x + wall.w,
+        wall.y,
+        0x241e18,
+        wall.height,
+        occlusionLayer,
+        platformTopElevation,
+        true,
+        `platform-back-wall:${wall.x}:${wall.y}:${wall.w}`
+      );
+      drawWallVines(true, () => true);
+      for (const door of level.doors) drawConfiguredDoor(door, occlusionLayer);
+      return;
+    }
+    for (const door of level.doors) {
+      if (doorOccludesPlayer(door)) drawConfiguredDoor(door, occlusionLayer);
+    }
+    return;
+  }
   if (level.kind !== "dungeon") return;
+  const crossedDoor = level.doors.find(playerHasExitedDoor);
   const playerOnPlatform = state.player.floorZ >= level.platformHeight - 8 && pointInRect(state.player.x, state.player.y, level.upperPlatform, 8);
   drawStairs(occlusionLayer, true);
   drawUpperPlatformOccluder();
-  if (cameraDepth(level.exit.x + level.exit.w / 2, level.exit.y + level.exit.h / 2) > 8) drawElevatedExit(occlusionLayer);
   const columns = level.columns
     .filter(() => !playerOnPlatform)
     .filter((column) => cameraDepth(column.x, column.y) > 8)
@@ -1968,14 +2801,18 @@ function drawForegroundOccluders() {
   for (const potion of level.potions) {
     if (!potion.collected && cameraDepth(potion.x, potion.y) > 8) drawPotion(potion, occlusionLayer);
   }
-  drawWalls(occlusionLayer, true);
+  drawWalls(occlusionLayer, true, Boolean(crossedDoor));
+  drawWallVines(true, crossedDoor
+    ? (vine) => Math.abs(vine.y - crossedDoor.y) <= 0.01
+    : null);
+  drawElevatedExit(occlusionLayer);
 }
 
 function objectScreenY(object) {
   return worldToScreen(object.x, object.y).y;
 }
 
-function drawSceneObjects() {
+function drawSceneObjects(target = g, elevated = false) {
   const objects = [
     ...level.columns.map((o) => ({ ...o, kind: "column" })),
     ...level.torches.map((o) => ({ ...o, kind: "torch" })),
@@ -1986,7 +2823,7 @@ function drawSceneObjects() {
     if (object.kind === "column") drawColumn(object);
     if (object.kind === "torch") drawTorch(object);
     if (object.kind === "coin") drawCoin(object);
-    if (object.kind === "potion") drawPotion(object);
+    if (object.kind === "potion") drawPotion(object, target, elevated);
   }
 }
 
@@ -2019,18 +2856,52 @@ function drawCoin(coin, target = g) {
   sprite.tint = 0xffefbd;
 }
 
-function drawPotion(potion, target = g) {
-  const p = worldToScreen(potion.x, potion.y);
+function drawPotion(potion, target = g, elevated = false) {
+  const z = elevated ? platformTopElevation : 0;
+  const p = worldToScreen(potion.x, potion.y, z);
   const s = state.zoom;
   const pulse = 1 + Math.sin(performance.now() * 0.004 + potion.x) * 0.08;
-  target.circle(p.x, p.y - 10 * s, 31 * s * pulse).fill({ color: potion.glow, alpha: 0.16 });
-  target.ellipse(p.x + 3 * s, p.y + 3 * s, 13 * s, 5 * s).fill({ color: 0x000000, alpha: 0.42 });
-  target.roundRect(p.x - 10 * s, p.y - 25 * s, 20 * s, 25 * s, 7 * s)
-    .fill({ color: potion.color, alpha: 0.9 }).stroke({ color: 0x170e18, width: 2.5 });
-  target.roundRect(p.x - 4 * s, p.y - 34 * s, 8 * s, 11 * s, 2 * s)
-    .fill(0x685646).stroke({ color: 0x170e18, width: 2 });
-  target.circle(p.x - 4 * s, p.y - 17 * s, 3 * s).fill({ color: 0xffffff, alpha: 0.56 });
-  line({ x: p.x - 7 * s, y: p.y - 4 * s }, { x: p.x + 7 * s, y: p.y - 4 * s }, 0xe8d9bd, 2, 0.48, target);
+  const bob = Math.sin(performance.now() * 0.0035 + potion.y) * 2.2 * s;
+  target.circle(p.x, p.y - 24 * s + bob, 32 * s * pulse).fill({ color: potion.glow, alpha: 0.18 });
+  target.ellipse(p.x + 4 * s, p.y + 4 * s, 18 * s, 6 * s).fill({ color: 0x000000, alpha: 0.46 });
+  const textureIndex = { health: 0, mana: 1, magic: 2 }[potion.type] ?? 0;
+  const texture = art.potion[textureIndex];
+  const foreground = target === occlusionLayer;
+  const sprite = objectSprite(`potion:${potion.type}:${potion.x}:${potion.y}`, texture, foreground, elevated);
+  sprite.anchor.set(0.5, 0.93);
+  const scale = 62 * s / texture.height;
+  sprite.scale.set(scale);
+  sprite.position.set(p.x, p.y + 2 * s + bob);
+  sprite.tint = 0xffffff;
+}
+
+function interiorTorchMount(torch) {
+  const epsilon = 0.1;
+  const inset = meter * 0.2;
+  const candidates = [];
+  for (const rect of level.bounds) {
+    const withinX = torch.x >= rect.x - epsilon && torch.x <= rect.x + rect.w + epsilon;
+    const withinY = torch.y >= rect.y - epsilon && torch.y <= rect.y + rect.h + epsilon;
+    if (withinX && Math.abs(torch.y - rect.y) <= epsilon) candidates.push({ normalX: 0, normalY: 1 });
+    if (withinX && Math.abs(torch.y - (rect.y + rect.h)) <= epsilon) candidates.push({ normalX: 0, normalY: -1 });
+    if (withinY && Math.abs(torch.x - rect.x) <= epsilon) candidates.push({ normalX: 1, normalY: 0 });
+    if (withinY && Math.abs(torch.x - (rect.x + rect.w)) <= epsilon) candidates.push({ normalX: -1, normalY: 0 });
+  }
+  const explicitNormal = Number.isFinite(torch.normalX) && Number.isFinite(torch.normalY)
+    ? { normalX: torch.normalX, normalY: torch.normalY }
+    : null;
+  const inward = explicitNormal || candidates.find((candidate) => pointInRawWalkable(
+    torch.x + candidate.normalX * inset,
+    torch.y + candidate.normalY * inset
+  )) || candidates[0] || { normalX: 0, normalY: 0 };
+  return {
+    wallX: torch.x,
+    wallY: torch.y,
+    normalX: inward.normalX,
+    normalY: inward.normalY,
+    x: torch.x + inward.normalX * inset,
+    y: torch.y + inward.normalY * inset
+  };
 }
 
 function drawTorch(torch) {
@@ -2038,26 +2909,48 @@ function drawTorch(torch) {
   const roomWallHeight = torch.y <= -340 * planScale ? elevatedChamberWallHeight : torch.y < 140 * planScale ? 98 : 80;
   const flameHeight = 54;
   const mountZ = Math.max(8, roomWallHeight * 0.95 - flameHeight);
-  const p = worldToScreen(torch.x, torch.y, mountZ);
+  const mount = interiorTorchMount(torch);
+  const inwardViewNormal = rotate(mount.normalX, mount.normalY, -state.yaw).y;
+  if (inwardViewNormal < Math.cos(torchVisibilityArc / 2)) return;
+  const shaftBase = worldToScreen(
+    mount.wallX + mount.normalX * meter * 0.13,
+    mount.wallY + mount.normalY * meter * 0.13,
+    mountZ + 3
+  );
+  const shaftTop = worldToScreen(
+    mount.wallX + mount.normalX * meter * 0.23,
+    mount.wallY + mount.normalY * meter * 0.23,
+    mountZ + 27
+  );
+  const wallLow = worldToScreen(mount.wallX, mount.wallY, mountZ + 5);
+  const wallHigh = worldToScreen(mount.wallX, mount.wallY, mountZ + 15);
   const s = state.zoom;
   const flicker = Math.sin(performance.now() * 0.018 + torch.x * 0.04) * 3;
-  const flameShoulder = 33;
-  const innerTop = 47 + flicker * 0.5;
-  line({ x: p.x - 8 * s, y: p.y }, { x: p.x + 7 * s, y: p.y - 13 * s }, 0x17100a, 6 * s, 1);
-  centeredRect(p.x + 5 * s, p.y - 17 * s, 8 * s, 24 * s, 0x3f2816, 0x100906);
-  line({ x: p.x + 1 * s, y: p.y - 22 * s }, { x: p.x + 9 * s, y: p.y - 11 * s }, 0x9d7041, 2, 0.7);
-  g.circle(p.x + 5 * s, p.y - flameShoulder * s, (48 + flicker) * s).fill({ color: 0xd85c22, alpha: 0.15 });
+  const flameShoulder = 9;
+  const innerTop = 23 + flicker * 0.5;
+  line(wallLow, shaftBase, 0x17100a, 6 * s, 1);
+  line(wallHigh, shaftBase, 0x9d7041, 2 * s, 0.75);
+  line(shaftBase, shaftTop, 0x100906, 11 * s, 1);
+  line(shaftBase, shaftTop, 0x3f2816, 7 * s, 1);
+  line(
+    { x: shaftBase.x - 2 * s, y: shaftBase.y - 2 * s },
+    { x: shaftTop.x - 2 * s, y: shaftTop.y + 2 * s },
+    0x9d7041,
+    2 * s,
+    0.7
+  );
+  g.circle(shaftTop.x, shaftTop.y - flameShoulder * s, (48 + flicker) * s).fill({ color: 0xd85c22, alpha: 0.15 });
   poly([
-    { x: p.x + 5 * s, y: p.y - flameHeight * s },
-    { x: p.x + 15 * s, y: p.y - flameShoulder * s },
-    { x: p.x + 5 * s, y: p.y - 20 * s },
-    { x: p.x - 5 * s, y: p.y - flameShoulder * s }
+    { x: shaftTop.x, y: shaftTop.y - (flameHeight - 24) * s },
+    { x: shaftTop.x + 10 * s, y: shaftTop.y - flameShoulder * s },
+    { x: shaftTop.x, y: shaftTop.y + 4 * s },
+    { x: shaftTop.x - 10 * s, y: shaftTop.y - flameShoulder * s }
   ], 0xe56b24, 0x5a1f0c, 1.5);
   poly([
-    { x: p.x + 5 * s, y: p.y - innerTop * s },
-    { x: p.x + 11 * s, y: p.y - flameShoulder * s },
-    { x: p.x + 5 * s, y: p.y - 25 * s },
-    { x: p.x, y: p.y - flameShoulder * s }
+    { x: shaftTop.x, y: shaftTop.y - innerTop * s },
+    { x: shaftTop.x + 6 * s, y: shaftTop.y - flameShoulder * s },
+    { x: shaftTop.x, y: shaftTop.y },
+    { x: shaftTop.x - 5 * s, y: shaftTop.y - flameShoulder * s }
   ], 0xffd56b, null, 1);
 }
 
@@ -2194,11 +3087,50 @@ function movementInputDirectionRow() {
   return ((Math.round((angle - Math.PI / 2) / (Math.PI / 4)) % 8) + 8) % 8;
 }
 
+function actorTexturePoint(point) {
+  const localX = (point[0] - actorSprite.anchor.x) * actorSprite.texture.width * actorSprite.scale.x;
+  const localY = (point[1] - actorSprite.anchor.y) * actorSprite.texture.height * actorSprite.scale.y;
+  const cosine = Math.cos(actorSprite.rotation);
+  const sine = Math.sin(actorSprite.rotation);
+  return {
+    x: actorSprite.x + localX * cosine - localY * sine,
+    y: actorSprite.y + localX * sine + localY * cosine
+  };
+}
+
+function drawMagicSwordBlade(row, mode, frame) {
+  if (magicSwordHiddenFrames[mode]?.[row]?.has(frame)) return;
+  const blade = magicSwordBladeMaps[mode][row];
+  const base = actorTexturePoint(blade[0]);
+  const tip = actorTexturePoint(blade[1]);
+  const dx = tip.x - base.x;
+  const dy = tip.y - base.y;
+  const length = Math.hypot(dx, dy) || 1;
+  const normalX = -dy / length;
+  const normalY = dx / length;
+  const pulse = 1 + Math.sin(performance.now() * 0.012) * 0.08;
+  const bladePolygon = (baseWidth, tipWidth) => [
+    base.x + normalX * baseWidth, base.y + normalY * baseWidth,
+    tip.x + normalX * tipWidth, tip.y + normalY * tipWidth,
+    tip.x - normalX * tipWidth, tip.y - normalY * tipWidth,
+    base.x - normalX * baseWidth, base.y - normalY * baseWidth
+  ];
+
+  actorFx.poly(bladePolygon(7 * state.zoom * pulse, 4.5 * state.zoom * pulse))
+    .fill({ color: 0x3ecfff, alpha: 0.2 });
+  actorFx.poly(bladePolygon(3.8 * state.zoom, 1.8 * state.zoom))
+    .fill({ color: 0x68dfff, alpha: 0.58 })
+    .stroke({ color: 0xbcefff, width: 1.8 * state.zoom, alpha: 0.92 });
+  line(base, tip, 0xe8fbff, 1.2 * state.zoom, 0.96, actorFx);
+  actorFx.circle(tip.x, tip.y, 3.5 * state.zoom * pulse)
+    .fill({ color: 0x9ceaff, alpha: 0.3 });
+}
+
 function drawCharacter() {
   const player = state.player;
   actorLayer.visible = !state.tutorial?.portalHidden;
   if (!actorLayer.visible) return;
-  const moving = isMoving();
+  const moving = isMoving() || state.doorSequence?.phase === "pass";
   let row = actorDirectionRow();
   let column = 0;
   let sheet = art.action;
@@ -2257,8 +3189,9 @@ function drawCharacter() {
   actorShadow.clear();
   actorAura.clear();
   actorFx.clear();
-  const baseX = state.width / 2;
-  const baseY = state.height / 2 + 18;
+  const playerScreen = worldToScreen(player.x, player.y, player.floorZ);
+  const baseX = level.kind === "platform" ? playerScreen.x : state.width / 2;
+  const baseY = (level.kind === "platform" ? playerScreen.y : state.height / 2) + 18;
   const inDeepWater = playerInDeepWater();
   actorLayer.zIndex = baseY;
   const shadowScale = 1 - clamp(player.z / 240, 0, 0.48);
@@ -2334,13 +3267,18 @@ function drawCharacter() {
     strokedArc(actorFx, centerX, centerY, 69 * state.zoom, start + 0.12, end - 0.12, magicSword ? 0xdaf8ff : 0xffffff, 1.5 * state.zoom, 0.82);
   }
 
-  if (effectActive("magic", "magicSword")) {
-    const direction = groundDirection(player.heading);
-    const hand = { x: actorSprite.x + direction.x * 10 * state.zoom, y: actorSprite.y - 52 * state.zoom + direction.y * 7 * state.zoom };
-    const tip = { x: hand.x + direction.x * 54 * state.zoom, y: hand.y + direction.y * 40 * state.zoom };
-    line(hand, tip, 0x3ebfe9, 8 * state.zoom, 0.22, actorFx);
-    line(hand, tip, 0xbdefff, 2.2 * state.zoom, 0.9, actorFx);
-    actorFx.circle(tip.x, tip.y, 4.5 * state.zoom).fill({ color: 0xa9efff, alpha: 0.45 });
+  if (
+    effectActive("magic", "magicSword") &&
+    !player.ledge &&
+    player.rollTime <= 0 &&
+    player.bombThrowTime <= 0 &&
+    player.grounded &&
+    player.stance !== "crawl"
+  ) {
+    const bladeMode = player.attackTime > 0
+      ? "strike"
+      : player.stance === "crouch" ? "crouch" : moving ? "walk" : "idle";
+    drawMagicSwordBlade(row, bladeMode, column);
   }
 
   if (effectActive("mana", "superSprint") && moving && player.stance === "stand") {
@@ -2500,6 +3438,7 @@ function slimePathClear(enemy, targetX, targetY) {
     const x = enemy.x + (targetX - enemy.x) * t;
     const y = enemy.y + (targetY - enemy.y) * t;
     const elevation = groundElevation(x, y);
+    if (pointInDiscoveredSecret(x, y)) return false;
     if (!pointInWalkable(x, y, 22) || Math.abs(elevation - previousElevation) > 36) return false;
     if (level.columns.some((column) => Math.hypot(x - column.x, y - column.y) < 43)) return false;
     previousElevation = elevation;
@@ -2726,6 +3665,11 @@ function drawBombEffects() {
 function update(delta) {
   updateTutorialAdvance(delta);
   updateEffects(delta);
+  if (state.doorSequence) {
+    updateDoorTraversal(delta);
+    updateTransition(delta);
+    return;
+  }
   let mx = 0;
   let my = 0;
   if (state.keys.has("ArrowUp") || state.keys.has("KeyW")) my -= 1;
@@ -2734,7 +3678,11 @@ function update(delta) {
   if (state.keys.has("ArrowRight") || state.keys.has("KeyD")) mx += 1;
 
   const player = state.player;
+  const previousPlayerZ = player.z;
   let moving = mx !== 0 || my !== 0;
+  if (level.kind === "platform" && player.falling) {
+    player.fallTime += delta;
+  }
   const sprinting = state.keys.has("ShiftLeft") || state.keys.has("ShiftRight");
   const tutorial = state.tutorial;
   player.ledgeGrabCooldown = Math.max(0, player.ledgeGrabCooldown - delta);
@@ -2768,7 +3716,7 @@ function update(delta) {
       tutorial.portalHidden = false;
       startTransition("level1.html?fade=1", 0.28);
     }
-  } else if (moving && !tutorial?.portalDive && player.rollTime <= 0) {
+  } else if (moving && !tutorial?.portalDive && player.rollTime <= 0 && (!player.falling || level.kind === "platform")) {
     const len = Math.hypot(mx, my);
     mx /= len;
     my /= len;
@@ -2811,7 +3759,7 @@ function update(delta) {
     player.jumpAge += delta;
     player.vz -= 1380 * delta;
     player.z += player.vz * delta;
-    if (player.z <= 0) {
+    if (player.z <= 0 && !(level.kind === "platform" && player.falling)) {
       player.z = 0;
       player.vz = 0;
       player.jumpAge = 0;
@@ -2835,38 +3783,87 @@ function update(delta) {
   player.landTime = Math.max(0, player.landTime - delta);
 
   if (level.kind === "dungeon") {
-    if (!player.ledge) player.floorZ = groundElevation(player.x, player.y);
-    collectItems();
-    if (!state.transitioning && player.floorZ >= level.platformHeight * 0.85 && pointInRect(player.x, player.y, level.exit, 10)) {
-      startTransition("level0.html?fade=1");
+    if (!player.ledge) {
+      const feetZ = player.floorZ + player.z;
+      const supportReach = feetZ + (player.grounded ? waterBasinDepth : 2);
+      const supportZ = groundElevation(player.x, player.y, supportReach);
+      if (supportZ !== player.floorZ) {
+        player.floorZ = supportZ;
+        if (!player.grounded) player.z = Math.max(0, feetZ - supportZ);
+      }
     }
+    collectItems();
+    if (!state.transitioning) tryStartDoorTraversal();
+  } else if (level.kind === "platform") {
+    const supported = level.platforms.some((platform) => pointInRect(player.x, player.y, platform, -playerCollisionRadius * 0.15));
+    if (!player.falling && !supported) {
+      player.falling = true;
+      player.fallTime = 0;
+      player.grounded = false;
+      if (player.vz < 0) player.vz = 0;
+      setStatus("Falling");
+    }
+    const crossedPlatformHeight = previousPlayerZ >= 0 && player.z <= 0;
+    const landingPlatform = level.platforms.find((platform) => pointInRect(
+      player.x,
+      player.y,
+      platform,
+      playerCollisionRadius * 0.35
+    ));
+    const withinLandingHeight = player.z >= -waterBasinDepth && player.z <= meter * 0.35;
+    if (player.falling && landingPlatform && player.vz <= 0 && (crossedPlatformHeight || withinLandingHeight)) {
+      const landingInset = playerCollisionRadius * 0.15;
+      player.x = clamp(player.x, landingPlatform.x + landingInset, landingPlatform.x + landingPlatform.w - landingInset);
+      player.y = clamp(player.y, landingPlatform.y + landingInset, landingPlatform.y + landingPlatform.h - landingInset);
+      player.falling = false;
+      player.fallTime = 0;
+      player.floorZ = platformTopElevation;
+      player.z = 0;
+      player.vz = 0;
+      player.grounded = true;
+      player.landTime = 0.18;
+      setStatus("Landed");
+    }
+    player.floorZ = platformTopElevation;
+    collectItems();
+    if (player.falling && player.floorZ + player.z <= platformTopElevation - platformDeathDepth && !state.transitioning) {
+      player.health = 0;
+      refreshInventory();
+      startTransition("level1-2.html?fade=1&fastFade=1&reset=1", 0.03, 4);
+    }
+    if (!state.transitioning) tryStartDoorTraversal();
   }
-  const areaZoom = level.kind === "dungeon" && pointInRect(player.x, player.y, level.bounds[1], 26) ? 1.65 : 1;
   const geometryZoom = geometryTestFine ? 1.25 : geometryTestCoarse ? 0.55 : 1;
-  const targetZoom = areaZoom * (effectActive("mana", "extendedSight") ? 0.86 : 1) * geometryZoom;
+  const gameplayZoom = level.kind === "platform"
+    ? fittedPlatformCameraZoom(level, state.width)
+    : effectActive("mana", "extendedSight") ? extendedSightCameraZoom : defaultCameraZoom;
+  const targetZoom = geometryTestMode ? geometryZoom : gameplayZoom;
   state.zoom += (targetZoom - state.zoom) * (1 - Math.exp(-5 * delta));
 
   updateBombs(delta);
   updateEnemies(delta);
 
-  if (state.transitioning) {
-    state.transitionDelay = Math.max(0, state.transitionDelay - delta);
-    if (state.transitionDelay === 0) state.fade = Math.min(1, state.fade + delta);
-    if (state.fade >= 1 && state.transitionTarget) window.location.href = state.transitionTarget;
-  } else if (state.fade > 0) {
-    state.fade = Math.max(0, state.fade - delta);
-  }
+  updateTransition(delta);
 }
 
 function movePlayer(dx, dy) {
   const player = state.player;
   const startX = player.x;
   const startY = player.y;
+  if (level.kind === "platform") {
+    const traversal = platformTraversalBounds(level);
+    const nextX = clamp(player.x + dx, traversal.west + playerCollisionRadius, traversal.east - playerCollisionRadius);
+    const nextY = clamp(player.y + dy, traversal.north + playerCollisionRadius, traversal.south - playerCollisionRadius);
+    player.x = nextX;
+    player.y = nextY;
+    player.floorZ = platformTopElevation;
+    return Math.hypot(player.x - startX, player.y - startY);
+  }
   const nextX = player.x + dx;
   const nextY = player.y + dy;
   const maxStepHeight = waterBasinDepth;
-  let currentElevation = groundElevation(player.x, player.y);
-  let airborneWorldZ = currentElevation + player.z;
+  let currentElevation = player.floorZ;
+  let airborneWorldZ = player.floorZ + player.z;
   const canTraverse = (elevation) => player.grounded
     ? elevation <= currentElevation + maxStepHeight
     : elevation <= airborneWorldZ + 2;
@@ -2881,7 +3878,8 @@ function movePlayer(dx, dy) {
     if (!player.grounded) player.z = Math.max(0, airborneWorldZ - elevation);
     currentElevation = elevation;
   };
-  const nextXElevation = groundElevation(nextX, player.y);
+  const reachableSurfaceZ = () => airborneWorldZ + (player.grounded ? maxStepHeight : 2);
+  const nextXElevation = groundElevation(nextX, player.y, reachableSurfaceZ());
   if (
     pointInWalkable(nextX, player.y, playerCollisionRadius)
     && !columnBlocksMovement(nextX, player.y, airborneWorldZ)
@@ -2890,7 +3888,7 @@ function movePlayer(dx, dy) {
     player.x = nextX;
     applyElevation(nextXElevation);
   }
-  const nextYElevation = groundElevation(player.x, nextY);
+  const nextYElevation = groundElevation(player.x, nextY, reachableSurfaceZ());
   if (
     pointInWalkable(player.x, nextY, playerCollisionRadius)
     && !columnBlocksMovement(player.x, nextY, airborneWorldZ)
@@ -2930,9 +3928,13 @@ function render() {
   for (const sprite of wallTextureSprites.values()) sprite.visible = false;
   for (const sprite of occlusionWallTextureSprites.values()) sprite.visible = false;
   for (const sprite of scenerySprites.values()) sprite.visible = false;
+  for (const sprite of elevatedScenerySprites.values()) sprite.visible = false;
   for (const sprite of occlusionSprites.values()) sprite.visible = false;
+  for (const sprite of vineSprites.values()) sprite.visible = false;
+  for (const sprite of occlusionVineSprites.values()) sprite.visible = false;
   if (level.kind === "infinite") drawInfiniteFloor();
   else if (level.kind === "tutorial") drawTutorialFloor();
+  else if (level.kind === "platform") drawPlatformRoom();
   else drawDungeonFloor();
   for (let i = floorSpriteCount; i < floorLayer.children.length; i += 1) floorLayer.children[i].visible = false;
   drawLight();
@@ -3030,6 +4032,40 @@ function useWeapon() {
   if (isTutorial && state.tutorial.step === tutorialStep.attack) completeTutorialStep(tutorialStep.attack);
 }
 
+function tryActivateSecretControl() {
+  const forwardX = Math.cos(state.player.heading);
+  const forwardY = Math.sin(state.player.heading);
+  const candidate = (level.secrets || [])
+    .filter((secret) => !state.discoveredSecrets.has(secret.id))
+    .map((secret) => {
+      const control = secret.control;
+      const dx = control.x - state.player.x;
+      const dy = control.y - state.player.y;
+      const distance = Math.hypot(dx, dy);
+      const facing = distance > 0 ? (dx * forwardX + dy * forwardY) / distance : 1;
+      return { secret, control, distance, facing };
+    })
+    .filter(({ control, distance, facing }) =>
+      distance <= control.radius &&
+      facing >= 0.1 &&
+      state.player.floorZ >= (control.minFloorZ || 0) &&
+      state.player.floorZ <= (control.maxFloorZ ?? Number.POSITIVE_INFINITY)
+    )
+    .sort((a, b) => a.distance - b.distance)[0];
+  if (!candidate) return false;
+  if (secretControlBlocked(candidate.control)) {
+    state.player.specialTime = 0.35;
+    setStatus("The mechanism is obstructed");
+    return true;
+  }
+
+  state.discoveredSecrets.add(candidate.secret.id);
+  state.player.specialTime = 0.35;
+  persistSecretDiscovery();
+  setStatus(`${candidate.secret.name} revealed`);
+  return true;
+}
+
 function specialAction() {
   if (state.player.ledge) {
     setStatus("Both hands are on the ledge");
@@ -3055,6 +4091,8 @@ function specialAction() {
     refreshInventory();
     setStatus("Bomb thrown");
     if (isTutorial && state.tutorial.step === tutorialStep.special) completeTutorialStep(tutorialStep.special);
+  } else if (tryActivateSecretControl()) {
+    // The control interaction supplies its own status and animation state.
   } else {
     state.player.specialTime = 0.35;
     setStatus("Special action");
@@ -3109,6 +4147,10 @@ window.addEventListener("keydown", (event) => {
     return;
   }
   if (state.paused) {
+    event.preventDefault();
+    return;
+  }
+  if (state.doorSequence || state.transitioning) {
     event.preventDefault();
     return;
   }
@@ -3279,7 +4321,7 @@ document.addEventListener("visibilitychange", () => {
 restoreBrowserCursor();
 
 app.canvas.addEventListener("mousedown", (event) => {
-  if (state.paused) return;
+  if (state.paused || state.doorSequence || state.transitioning) return;
   if (event.button === 0) {
     if (tutorialActionUnlocked("attack")) useWeapon();
     else setStatus("Complete the current lesson");
@@ -3292,7 +4334,7 @@ app.canvas.addEventListener("mousedown", (event) => {
 app.canvas.addEventListener("contextmenu", (event) => event.preventDefault());
 
 window.addEventListener("mousemove", (event) => {
-  if (state.paused) return;
+  if (state.paused || state.doorSequence || state.transitioning || level.kind === "platform") return;
   state.yaw += event.movementX * 0.006;
   state.pitch = clamp(state.pitch + event.movementY * 0.0035, minPitch, maxPitch);
   state.projectionY = Math.sin(state.pitch);
@@ -3305,7 +4347,7 @@ applyGraphicsSettings();
 applyAudioSettings();
 window.addEventListener("pointerdown", startLevelMusic);
 window.addEventListener("keydown", startLevelMusic);
-preloadDestination(isTutorial ? "level1.html" : levelId === 1 ? "level0.html" : null);
+preloadDestination(isTutorial ? "level1.html" : isLevelOneOne ? "level1-2.html" : isLevelOneTwo ? "level0.html" : null);
 let lastTime = performance.now();
 app.ticker.add(() => {
   const now = performance.now();

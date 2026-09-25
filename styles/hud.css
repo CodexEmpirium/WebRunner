@@ -330,7 +330,7 @@ canvas {
 .main-menu-page::before {
   content: "";
   position: fixed;
-  z-index: 1;
+  z-index: 0;
   inset: 0;
   background: radial-gradient(circle at 50% 42%, rgba(45, 37, 24, 0.28), rgba(2, 2, 2, 0.94) 72%);
   pointer-events: none;
@@ -338,7 +338,7 @@ canvas {
 
 .main-menu-background {
   position: fixed;
-  z-index: 0;
+  z-index: 2;
   inset: 0;
   overflow: hidden;
   background: #050403;
@@ -363,7 +363,6 @@ canvas {
 .main-menu-background-placeholder {
   background: #090806 url("../assets/art/dungeon-floor.png") center / 520px auto repeat;
   transform: scale(1.14);
-  animation: menu-scene-drift 18s ease-in-out infinite alternate;
 }
 
 .main-menu-background-placeholder::before {
@@ -377,16 +376,36 @@ canvas {
 
 .main-menu-background-placeholder.hidden { opacity: 0; }
 
-html[data-graphics="low"] .main-menu-background-placeholder { animation: none; }
-
-@keyframes menu-scene-drift {
-  from { transform: scale(1.14) translate3d(-1.5%, -1%, 0); }
-  to { transform: scale(1.2) translate3d(1.5%, 1%, 0); }
+.title-vine {
+  position: absolute;
+  z-index: 2;
+  top: -3vh;
+  width: clamp(150px, 18vw, 260px);
+  height: 112vh;
+  opacity: 0.92;
+  filter: sepia(0.12) saturate(1.18) brightness(0.98) drop-shadow(0 4px 10px rgba(0, 0, 0, 0.9));
+  pointer-events: none;
 }
+
+.title-vine-left { left: 2vw; transform: rotate(5deg); }
+.title-vine-right { right: 2vw; transform: scaleX(-1) rotate(5deg); }
+
+.title-vine span {
+  display: block;
+  width: 100%;
+  height: 33.333%;
+  background: center / 100% 100% no-repeat;
+}
+
+.title-vine span:nth-child(1) { background-image: url("../assets/art/vines/vine-large-base-v1.png"); }
+.title-vine span:nth-child(2) { background-image: url("../assets/art/vines/vine-large-middle-v1.png"); margin-top: -3%; height: 39%; }
+.title-vine span:nth-child(3) { background-image: url("../assets/art/vines/vine-large-tip-v1.png"); margin-top: -3%; height: 34%; }
+
+html[data-graphics="low"] .title-vine { opacity: 0.58; }
 
 .main-menu-shell {
   position: relative;
-  z-index: 1;
+  z-index: 3;
   display: grid;
   min-height: 100%;
   place-items: center;
@@ -413,16 +432,30 @@ html[data-graphics="low"] .main-menu-background-placeholder { animation: none; }
 .main-menu-panel h1 {
   margin: 0 0 30px;
   color: #f5dfaa;
-  font: 700 44px Georgia, serif;
+  font-family: "Copperplate Gothic Bold", Copperplate, "Palatino Linotype", "Book Antiqua", Georgia, serif;
+  font-size: 44px;
+  font-variant: small-caps;
+  font-weight: 700;
+  line-height: 1.02;
   letter-spacing: 0;
+  text-shadow:
+    0 1px 0 #6e4e24,
+    0 2px 0 #24170b,
+    0 4px 14px rgba(0, 0, 0, 0.92);
 }
 
 .game-subtitle {
   display: block;
   margin-top: 5px;
   color: #ffffff;
+  font-family: "Palatino Linotype", "Book Antiqua", Palatino, Georgia, serif;
   font-size: 22px;
+  font-style: italic;
+  font-variant: normal;
   line-height: 1.2;
+  text-shadow:
+    0 1px 0 #5b3e1e,
+    0 3px 10px rgba(0, 0, 0, 0.95);
 }
 
 .main-menu-view.hidden { display: none; }

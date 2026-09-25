@@ -10,6 +10,8 @@
   <div class="main-menu-background" aria-hidden="true">
     <video class="main-menu-video" id="menuBackgroundVideo" autoplay muted loop playsinline></video>
     <div class="main-menu-background-placeholder" id="menuBackgroundPlaceholder"></div>
+    <div class="title-vine title-vine-left"><span></span><span></span><span></span></div>
+    <div class="title-vine title-vine-right"><span></span><span></span><span></span></div>
   </div>
   <audio id="titleMusic" data-music-slot="title" loop preload="none">
     <!-- Add title-screen music sources here. -->
@@ -20,8 +22,9 @@
         <p class="main-menu-kicker">A Dungeon Rogue Adventure</p>
         <h1 id="gameTitle">Dungeon Runner: <span class="game-subtitle">Felicity's Call</span></h1>
         <div class="main-menu-actions">
-          <a class="menu-button" id="newGame" href="./tutorial.html">New Game</a>
+          <a class="menu-button" id="newGame" href="./level1.html?reset=1&amp;fade=1" data-cutscene="opening" data-start-level="1.1">New Game</a>
           <button class="menu-button" id="loadGame" type="button">Load Game</button>
+          <a class="menu-button" id="tutorialGame" href="./tutorial.html?reset=1">Tutorial</a>
           <button class="menu-button" id="menuOptions" type="button">Options</button>
           <input id="saveFile" type="file" accept=".xml,text/xml,application/xml" hidden>
         </div>
